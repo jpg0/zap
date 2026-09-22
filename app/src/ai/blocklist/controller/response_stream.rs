@@ -222,6 +222,99 @@ enum RecoveryOutcome {
     Surfaced,
 }
 
+
+/// Builds the direct-inference input when `params.model` is a user-configured BYOP model.
+/// For any other model the cancellation receiver is handed back so the request can go
+/// through Warp's multi-agent API instead.
+fn byop_output_input(
+    params: &api::RequestParams,
+    cancellation_rx: oneshot::Receiver<()>,
+    ctx: &warpui::AppContext,
+) -> Result<crate::ai::agent_providers::chat_stream::ByopOutputInput, oneshot::Receiver<()>> {
+    match byop_target(params, ctx) {
+        Some(target) => Ok(target.into_input(params, cancellation_rx)),
+        None => Err(cancellation_rx),
+    }
+}
+
+struct ByopTarget {
+    provider: crate::settings::AgentProvider,
+    api_key: String,
+    model_id: String,
+    root_task_id: String,
+    target_task_id: String,
+    needs_create_task: bool,
+    context_window: Option<u32>,
+    attachment_caps: crate::ai::agent_providers::attachment_caps::AttachmentCaps,
+    reasoning_effort: crate::settings::ReasoningEffortSetting,
+}
+
+impl ByopTarget {
+    fn into_input(
+        self,
+        params: &api::RequestParams,
+        cancellation_rx: oneshot::Receiver<()>,
+    ) -> crate::ai::agent_providers::chat_stream::ByopOutputInput {
+        crate::ai::agent_providers::chat_stream::ByopOutputInput {
+            params: params.clone(),
+            base_url: self.provider.base_url,
+            api_key: self.api_key,
+            model_id: self.model_id,
+            api_type: self.provider.api_type,
+            reasoning_effort: self.reasoning_effort,
+            extra_headers: self.provider.extra_headers,
+            task_id: self.root_task_id,
+            target_task_id: self.target_task_id,
+            needs_create_task: self.needs_create_task,
+            lrc_command_id: params.lrc_command_id.clone(),
+            lrc_should_spawn_subagent: params.lrc_should_spawn_subagent,
+            context_window: self.context_window,
+            cancellation_rx,
+            attachment_caps: self.attachment_caps,
+        }
+    }
+}
+
+fn byop_target(params: &api::RequestParams, ctx: &warpui::AppContext) -> Option<ByopTarget> {
+    use crate::ai::agent_providers::attachment_caps;
+    use crate::ai::blocklist::BlocklistAIHistoryModel;
+    use crate::ai::llms::LLMPreferences;
+
+    let (provider, api_key, model_id) =
+        crate::ai::agent_providers::lookup_byop(ctx, &params.model)?;
+    let conversation_id = params.byop_conversation_id.as_ref()?;
+    let conversation = BlocklistAIHistoryModel::as_ref(ctx).conversation(conversation_id)?;
+    let root_task_id = conversation.get_root_task_id().to_string();
+    let target_task_id = params
+        .byop_target_task_id
+        .clone()
+        .unwrap_or_else(|| root_task_id.clone());
+    // Only tasks with a source are "active"; an empty set means the root task is still
+    // optimistic and the first BYOP turn has to upgrade it with a CreateTask event.
+    let needs_create_task = conversation.compute_active_tasks().is_empty();
+
+    let model = provider.models.iter().find(|m| m.id == model_id);
+    let context_window = model.map(|m| m.context_window).filter(|n| *n > 0);
+    let attachment_caps = match model {
+        Some(m) => attachment_caps::resolve_for_model(&provider.id, provider.api_type, m),
+        None => attachment_caps::caps_for(provider.api_type, &model_id),
+    };
+    let reasoning_effort =
+        LLMPreferences::as_ref(ctx).get_reasoning_effort(None, provider.api_type, &model_id);
+
+    Some(ByopTarget {
+        provider,
+        api_key,
+        model_id,
+        root_task_id,
+        target_task_id,
+        needs_create_task,
+        context_window,
+        attachment_caps,
+        reasoning_effort,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ResponseStreamId(String);
 
@@ -731,6 +824,18 @@ impl ResponseStream {
         cancellation_rx: oneshot::Receiver<()>,
         ctx: &mut ModelContext<Self>,
     ) {
+        let cancellation_rx = match byop_output_input(&params, cancellation_rx, ctx) {
+            Ok(input) => {
+                let _ = ctx.spawn(
+                    crate::ai::agent_providers::chat_stream::generate_byop_output(input),
+                    move |me, stream, ctx| {
+                        me.handle_response_stream_result(request_id, stream, ctx);
+                    },
+                );
+                return;
+            }
+            Err(cancellation_rx) => cancellation_rx,
+        };
         let server_api = ServerApiProvider::as_ref(ctx).get();
         let _ = ctx.spawn(
             async move {

@@ -450,6 +450,10 @@ pub struct AIConversation {
     /// only matters for the live process that bootstrapped the conversation, and a restored
     /// conversation resumes ordinary synchronization.
     task_sync_mode: TaskSyncMode,
+    /// BYOP local compaction sidecar (see [`crate::ai::byop_compaction`]).
+    pub(crate) compaction_state: crate::ai::byop_compaction::state::CompactionState,
+    /// BYOP repair sidecar; invalid sidecars are kept as-is so saving never silently authorizes repair.
+    pub(crate) byop_repair_state: crate::ai::byop_readiness::RepairStateStatus,
 }
 
 pub(crate) fn artifact_from_fork_proto(
@@ -507,6 +511,8 @@ impl AIConversation {
             orchestration_configs: HashMap::new(),
             pinned: false,
             task_sync_mode: TaskSyncMode::default(),
+            compaction_state: Default::default(),
+            byop_repair_state: Default::default(),
         }
     }
 
@@ -760,6 +766,8 @@ impl AIConversation {
             orchestration_configs: HashMap::new(),
             pinned,
             task_sync_mode: TaskSyncMode::default(),
+            compaction_state: Default::default(),
+            byop_repair_state: Default::default(),
         })
     }
 

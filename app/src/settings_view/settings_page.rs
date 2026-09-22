@@ -125,6 +125,7 @@ pub enum SettingsPageViewHandle {
     WarpAgent(ViewHandle<WarpAgentPageView>),
     AgentProfiles(ViewHandle<AgentProfilesPageView>),
     Knowledge(ViewHandle<KnowledgePageView>),
+    AgentProviders(ViewHandle<super::agent_providers_page::AgentProvidersPageView>),
     CLIAgents(ViewHandle<CLIAgentsPageView>),
     CloudEnvironments(ViewHandle<EnvironmentsPageView>),
     BillingAndUsage(ViewHandle<BillingAndUsageDispatchView>),
@@ -153,6 +154,7 @@ impl SettingsPageViewHandle {
             WarpAgent(view_handle) => ChildView::new(view_handle).finish(),
             AgentProfiles(view_handle) => ChildView::new(view_handle).finish(),
             Knowledge(view_handle) => ChildView::new(view_handle).finish(),
+            AgentProviders(view_handle) => ChildView::new(view_handle).finish(),
             CLIAgents(view_handle) => ChildView::new(view_handle).finish(),
             CloudEnvironments(view_handle) => ChildView::new(view_handle).finish(),
             BillingAndUsage(view_handle) => ChildView::new(view_handle).finish(),
@@ -1603,6 +1605,69 @@ impl<V: warpui::View> PageType<V> {
             horizontal_scroll_state: Default::default(),
             highlighted_widget_id: Default::default(),
             min_page_width: MIN_PAGE_WIDTH,
+        }
+    }
+
+    /// Returns the page's (vertical, horizontal) scroll handles so a rebuilt page can keep
+    /// its scroll position. `Monolith` pages only return them when both handles exist.
+    pub(super) fn scroll_states(
+        &self,
+    ) -> Option<(ClippedScrollStateHandle, ClippedScrollStateHandle)> {
+        match self {
+            Self::Uncategorized {
+                vertical_scroll_state,
+                horizontal_scroll_state,
+                ..
+            }
+            | Self::Categorized {
+                vertical_scroll_state,
+                horizontal_scroll_state,
+                ..
+            } => Some((
+                vertical_scroll_state.clone(),
+                horizontal_scroll_state.clone(),
+            )),
+            Self::Monolith {
+                vertical_scroll_state: Some(v),
+                horizontal_scroll_state: Some(h),
+                ..
+            } => Some((v.clone(), h.clone())),
+            Self::Monolith { .. } => None,
+        }
+    }
+
+    /// Replaces this page's scroll handles with a previous page's, preserving scroll position.
+    pub(super) fn replace_scroll_states(
+        &mut self,
+        v: ClippedScrollStateHandle,
+        h: ClippedScrollStateHandle,
+    ) {
+        match self {
+            Self::Uncategorized {
+                vertical_scroll_state,
+                horizontal_scroll_state,
+                ..
+            }
+            | Self::Categorized {
+                vertical_scroll_state,
+                horizontal_scroll_state,
+                ..
+            } => {
+                *vertical_scroll_state = v;
+                *horizontal_scroll_state = h;
+            }
+            Self::Monolith {
+                vertical_scroll_state,
+                horizontal_scroll_state,
+                ..
+            } => {
+                if vertical_scroll_state.is_some() {
+                    *vertical_scroll_state = Some(v);
+                }
+                if horizontal_scroll_state.is_some() {
+                    *horizontal_scroll_state = Some(h);
+                }
+            }
         }
     }
 

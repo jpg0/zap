@@ -177,6 +177,7 @@ fn all_sections_list_is_exhaustive() {
             | SettingsSection::AgentProfiles
             | SettingsSection::AgentMCPServers
             | SettingsSection::Knowledge
+            | SettingsSection::AgentProviders
             | SettingsSection::ThirdPartyCLIAgents
             | SettingsSection::CodeIndexing
             | SettingsSection::EditorAndCodeReview

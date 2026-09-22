@@ -5,9 +5,10 @@ use ai::api_keys::{ApiKeyManager, ApiKeyManagerEvent, CustomEndpoint, CustomEndp
 pub use ai::{LLMId, LLMProvider};
 use parking_lot::FairMutex;
 use serde::{Deserialize, Serialize, de};
+use settings::Setting as _;
 use warp_core::features::FeatureFlag;
 use warp_core::ui::Icon;
-use warp_errors::report_error;
+use warp_errors::{report_error, report_if_error};
 use warp_multi_agent_api as api;
 use warpui::{AppContext, Entity, EntityId, ModelContext, SingletonEntity};
 
@@ -15,6 +16,7 @@ use super::custom_model_routers::{self, CustomModelRouter, ModelConfigError};
 use super::execution_profiles::profiles::AIExecutionProfilesModel;
 use crate::auth::AuthStateProvider;
 use crate::server::ids::ServerId;
+use crate::settings::{AISettings, AISettingsChangedEvent};
 use crate::server::server_api::ServerApiProvider;
 use crate::user_config::{WarpConfig, WarpConfigUpdateEvent};
 #[cfg(feature = "agent_mode_evals")]
@@ -741,6 +743,17 @@ pub struct LLMPreferences {
     custom_llms: Vec<LLMInfo>,
     /// All custom model routers, including both local and cloud-backed.
     custom_model_routers: Vec<CustomModelRouter>,
+    /// Models from user-configured BYOP providers (`AISettings::agent_providers`). These are
+    /// called directly from the client, so unlike `custom_llms` they are not gated on any
+    /// Warp workspace entitlement.
+    byop_llms: Vec<LLMInfo>,
+    /// Reasoning effort chosen per terminal view for BYOP models.
+    reasoning_effort_per_terminal: HashMap<EntityId, crate::settings::ReasoningEffortSetting>,
+    /// Last reasoning effort used per `(api_type, model_id)`, seeded from settings.
+    last_used_reasoning: HashMap<
+        (crate::settings::AgentProviderApiType, String),
+        crate::settings::ReasoningEffortSetting,
+    >,
 }
 
 impl LLMPreferences {
@@ -775,8 +788,26 @@ impl LLMPreferences {
             });
         }
 
+        ctx.subscribe_to_model(&AISettings::handle(ctx), |me, _, event, ctx| {
+            if matches!(event, AISettingsChangedEvent::AgentProviders { .. }) {
+                me.byop_llms = crate::ai::agent_providers::build_byop_llm_infos(ctx);
+                ctx.emit(LLMPreferencesEvent::UpdatedAvailableLLMs);
+            }
+        });
+
         let base_llm_for_terminal_view = HashMap::new();
         let custom_llms = build_custom_llm_infos(ApiKeyManager::as_ref(ctx).custom_endpoints());
+        let byop_llms = crate::ai::agent_providers::build_byop_llm_infos(ctx);
+        let last_used_reasoning = AISettings::as_ref(ctx)
+            .byop_last_used_reasoning
+            .value()
+            .iter()
+            .filter_map(|(key, effort)| {
+                let (api_type, model_id) = key.split_once(':')?;
+                let api_type = crate::settings::AgentProviderApiType::from_debug_str(api_type)?;
+                Some(((api_type, model_id.to_owned()), *effort))
+            })
+            .collect();
 
         let mut me = Self {
             agent_mode_models_unavailable: HashMap::new(),
@@ -784,6 +815,9 @@ impl LLMPreferences {
             base_llm_for_terminal_view,
             custom_llms,
             custom_model_routers: Vec::new(),
+            byop_llms,
+            reasoning_effort_per_terminal: HashMap::new(),
+            last_used_reasoning,
         };
 
         // Seed from any already-loaded local config (the async load emits
@@ -1202,7 +1236,10 @@ impl LLMPreferences {
     /// Resolves an `LLMId` against the user's custom-endpoint LLMs.
     /// Returns `None` if the id isn't a known custom model `config_key`.
     pub fn custom_llm_info_for_id(&self, id: &LLMId) -> Option<&LLMInfo> {
-        self.custom_llms.iter().find(|info| info.id == *id)
+        self.custom_llms
+            .iter()
+            .chain(self.byop_llms.iter())
+            .find(|info| info.id == *id)
     }
 
     /// Returns `true` when `id` identifies a model that can run in a Warp cloud
@@ -1261,20 +1298,98 @@ impl LLMPreferences {
     }
 
     fn custom_llm_info_for_id_if_enabled(&self, id: &LLMId, app: &AppContext) -> Option<&LLMInfo> {
-        Self::custom_inference_enabled(app)
-            .then(|| self.custom_llm_info_for_id(id))
-            .flatten()
+        self.byop_llms.iter().find(|info| info.id == *id).or_else(|| {
+            Self::custom_inference_enabled(app)
+                .then(|| self.custom_llms.iter().find(|info| info.id == *id))
+                .flatten()
+        })
     }
 
     /// Iterator over the user's custom-endpoint LLMs, gated on the feature flag and entitlement.
-    pub fn custom_llm_choices(&self, app: &AppContext) -> std::slice::Iter<'_, LLMInfo> {
-        if Self::custom_inference_enabled(app) {
-            self.custom_llms.iter()
+    pub fn custom_llm_choices(&self, app: &AppContext) -> impl Iterator<Item = &LLMInfo> + Clone {
+        let custom: &[LLMInfo] = if Self::custom_inference_enabled(app) {
+            &self.custom_llms
         } else {
-            // Empty slice with a matching element type so the return type stays consistent
-            // across both branches.
-            (&[] as &[LLMInfo]).iter()
+            &[]
+        };
+        self.byop_llms.iter().chain(custom.iter())
+    }
+
+    /// Model used for conversation title generation (BYOP). Uses the active base model.
+    pub fn get_active_title_model<'a>(
+        &'a self,
+        app: &'a AppContext,
+        terminal_view_id: Option<EntityId>,
+    ) -> &'a LLMInfo {
+        self.get_active_base_model_for_team_uid(None, app, terminal_view_id)
+    }
+
+    /// Model used for proactive AI (prompt suggestions, NLD, relevant files). Uses the active base model.
+    pub fn get_active_ai_model<'a>(
+        &'a self,
+        app: &'a AppContext,
+        terminal_view_id: Option<EntityId>,
+    ) -> &'a LLMInfo {
+        self.get_active_base_model_for_team_uid(None, app, terminal_view_id)
+    }
+
+    /// Model used for next-command suggestions. Uses the active base model.
+    pub fn get_active_next_command_model<'a>(
+        &'a self,
+        app: &'a AppContext,
+        terminal_view_id: Option<EntityId>,
+    ) -> &'a LLMInfo {
+        self.get_active_base_model_for_team_uid(None, app, terminal_view_id)
+    }
+
+    /// Reasoning effort for a BYOP model: per-terminal choice, then last used for this
+    /// `(api_type, model)`, then the model's catalog default, then `Auto`.
+    pub fn get_reasoning_effort(
+        &self,
+        terminal_view_id: Option<EntityId>,
+        api_type: crate::settings::AgentProviderApiType,
+        model_id: &str,
+    ) -> crate::settings::ReasoningEffortSetting {
+        if let Some(effort) =
+            terminal_view_id.and_then(|tv| self.reasoning_effort_per_terminal.get(&tv))
+        {
+            return *effort;
         }
+        if let Some(effort) = self
+            .last_used_reasoning
+            .get(&(api_type, model_id.to_owned()))
+        {
+            return *effort;
+        }
+        crate::ai::agent_providers::reasoning::default_reasoning_for(api_type, model_id)
+            .unwrap_or(crate::settings::ReasoningEffortSetting::Auto)
+    }
+
+    /// Records the reasoning effort for a terminal view and persists it as the last used
+    /// value for this `(api_type, model)`.
+    pub fn set_reasoning_effort(
+        &mut self,
+        terminal_view_id: EntityId,
+        api_type: crate::settings::AgentProviderApiType,
+        model_id: &str,
+        effort: crate::settings::ReasoningEffortSetting,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        self.reasoning_effort_per_terminal
+            .insert(terminal_view_id, effort);
+        self.last_used_reasoning
+            .insert((api_type, model_id.to_owned()), effort);
+        let key = crate::settings::BYOPLastUsedReasoningMap::make_key(api_type, model_id);
+        AISettings::handle(ctx).update(ctx, |settings, ctx| {
+            let mut map = settings.byop_last_used_reasoning.value().0.clone();
+            map.insert(key, effort);
+            report_if_error!(
+                settings
+                    .byop_last_used_reasoning
+                    .set_value(crate::settings::BYOPLastUsedReasoningMap::new(map), ctx)
+            );
+        });
+        ctx.emit(LLMPreferencesEvent::UpdatedActiveAgentModeLLM);
     }
 
     fn custom_inference_enabled(app: &AppContext) -> bool {
@@ -2161,6 +2276,9 @@ impl LLMPreferences {
             base_llm_for_terminal_view: HashMap::new(),
             custom_llms,
             custom_model_routers: Vec::new(),
+            byop_llms: Vec::new(),
+            reasoning_effort_per_terminal: HashMap::new(),
+            last_used_reasoning: HashMap::new(),
         }
     }
 }

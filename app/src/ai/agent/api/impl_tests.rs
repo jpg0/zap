@@ -48,6 +48,15 @@ fn request_params_with_ask_user_question_enabled(ask_user_question_enabled: bool
         supported_tools_override: None,
         parent_agent_id: None,
         agent_name: None,
+        user_rules: Vec::new(),
+        byop_conversation_id: None,
+        byop_readiness_attempt_id: None,
+        lrc_command_id: None,
+        lrc_running_command: None,
+        lrc_should_spawn_subagent: false,
+        byop_target_task_id: None,
+        compaction_state: None,
+        byop_repair_state: Default::default(),
     }
 }
 

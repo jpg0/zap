@@ -24,13 +24,20 @@ use warp_core::features::FeatureFlag;
 use warp_core::user_preferences::GetUserPreferences;
 use warpui::{AppContext, EntityId, SingletonEntity as _};
 
-use super::{AIAgentInput, MCPContext, MCPServer, RequestMetadata, ServerOutputId, Suggestions};
+use super::{
+    AIAgentInput, MCPContext, MCPServer, RequestMetadata, RunningCommand, ServerOutputId,
+    Suggestions,
+};
 use crate::ai::agent::conversation::AIConversationId;
 use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::ai::blocklist::{BlocklistAIPermissions, RequestInput, SessionContext};
 use crate::ai::execution_profiles::AIExecutionProfileAppExt;
 use crate::ai::execution_profiles::profiles::AIExecutionProfilesModel;
+use crate::ai::facts::{AIFact, CloudAIFactModel};
 use crate::ai::llms::{LLMId, LLMPreferences};
+use crate::cloud_object::model::generic_string_model::GenericStringObjectId;
+use crate::cloud_object::CloudObject as _;
+use crate::cloud_object::model::persistence::CloudModel;
 use crate::ai::mcp::TemplatableMCPServerManager;
 use crate::server::server_api::AIApiError;
 use crate::settings::AISettings;
@@ -178,6 +185,38 @@ pub struct RequestParams {
     pub parent_agent_id: Option<String>,
     /// The display name for this agent (e.g. "Agent 1"), assigned by the orchestrator.
     pub agent_name: Option<String>,
+    /// BYOP: global Rules snapshot rendered into the system prompt (sorted for prompt-cache stability).
+    pub user_rules: Vec<(Option<String>, String)>,
+    /// BYOP: local conversation id, used for request-readiness diagnostics.
+    pub byop_conversation_id: Option<AIConversationId>,
+    /// BYOP: per-attempt correlation id for readiness diagnostics.
+    pub byop_readiness_attempt_id: Option<String>,
+    /// BYOP: long-running-command block this request is bound to, if any.
+    pub lrc_command_id: Option<String>,
+    /// BYOP: latest snapshot of the long-running command for follow-up turns.
+    pub lrc_running_command: Option<RunningCommand>,
+    /// BYOP: whether to synthesize a CreateTask that upgrades an optimistic CLI subtask.
+    pub lrc_should_spawn_subagent: bool,
+    /// BYOP: task the response should be written to (root task or CLI subtask).
+    pub byop_target_task_id: Option<String>,
+    /// BYOP: local conversation-compaction sidecar, back-filled by the controller.
+    pub compaction_state: Option<crate::ai::byop_compaction::state::CompactionState>,
+    /// BYOP: repair sidecar snapshot, read-only for the serializer.
+    pub byop_repair_state: crate::ai::byop_readiness::RepairStateStatus,
+}
+
+/// Snapshot of the user's global Rules (`AIFact::Memory`), excluding trashed ones, sorted so
+/// request ordering is stable across turns.
+pub(crate) fn collect_user_rules(cloud_model: &CloudModel) -> Vec<(Option<String>, String)> {
+    let mut rules: Vec<(Option<String>, String)> = cloud_model
+        .get_all_objects_of_type::<GenericStringObjectId, CloudAIFactModel>()
+        .filter(|ai_fact| !ai_fact.is_trashed(cloud_model))
+        .map(|ai_fact| match &ai_fact.model().string_model {
+            AIFact::Memory(memory) => (memory.name.clone(), memory.content.clone()),
+        })
+        .collect();
+    rules.sort();
+    rules
 }
 
 pub type Event = Result<warp_multi_agent_api::ResponseEvent, Arc<AIApiError>>;
@@ -238,6 +277,29 @@ impl RequestParams {
             supported_tools_override: None,
             parent_agent_id: None,
             agent_name: None,
+            user_rules: Vec::new(),
+            byop_conversation_id: None,
+            byop_readiness_attempt_id: None,
+            lrc_command_id: None,
+            lrc_running_command: None,
+            lrc_should_spawn_subagent: false,
+            byop_target_task_id: None,
+            compaction_state: None,
+            byop_repair_state: Default::default(),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn new_for_byop_test(
+        input: Vec<AIAgentInput>,
+        tasks: Vec<warp_multi_agent_api::Task>,
+    ) -> Self {
+        Self {
+            input,
+            byop_target_task_id: tasks.first().map(|task| task.id.clone()),
+            tasks,
+            byop_conversation_id: Some(AIConversationId::new()),
+            ..Self::new_for_test()
         }
     }
 
@@ -402,6 +464,22 @@ impl RequestParams {
         // server-side, drop the override; otherwise clamp it to the model's
         // current `[min, max]` range. This closes the window between an
         // in-flight model metadata refresh and the next request.
+        let user_rules = if is_memory_enabled {
+            collect_user_rules(CloudModel::as_ref(app))
+        } else {
+            Vec::new()
+        };
+        let byop_target_task_id = if request_input.input_messages.len() == 1 {
+            request_input
+                .input_messages
+                .keys()
+                .next()
+                .map(ToString::to_string)
+        } else {
+            None
+        };
+        let byop_conversation_id = Some(conversation.id);
+
         let context_window_limit = AIExecutionProfilesModel::as_ref(app)
             .active_profile(terminal_view_id, app)
             .data()
@@ -441,6 +519,15 @@ impl RequestParams {
             supported_tools_override: request_input.supported_tools_override.clone(),
             parent_agent_id: None,
             agent_name: None,
+            user_rules,
+            byop_conversation_id,
+            byop_readiness_attempt_id: None,
+            lrc_command_id: None,
+            lrc_running_command: None,
+            lrc_should_spawn_subagent: false,
+            byop_target_task_id,
+            compaction_state: None,
+            byop_repair_state: Default::default(),
         }
     }
 }

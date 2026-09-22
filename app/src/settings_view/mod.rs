@@ -78,6 +78,8 @@ use crate::{GlobalResourceHandlesProvider, TelemetryEvent};
 mod about_page;
 mod admin_actions;
 mod agent_assisted_environment_modal;
+mod agent_providers_page;
+mod agent_providers_widget;
 mod agent_profiles_page;
 mod ai_shared;
 mod appearance_page;
@@ -329,6 +331,7 @@ pub enum SettingsSection {
     AgentProfiles,
     AgentMCPServers,
     Knowledge,
+    AgentProviders,
     ThirdPartyCLIAgents,
     // ── Code umbrella subpages ──
     CodeIndexing,
@@ -354,6 +357,7 @@ impl Display for SettingsSection {
             SettingsSection::AgentProfiles => write!(f, "Profiles"),
             SettingsSection::AgentMCPServers => write!(f, "MCP servers"),
             SettingsSection::Knowledge => write!(f, "Knowledge"),
+            SettingsSection::AgentProviders => write!(f, "Agent providers"),
             SettingsSection::ThirdPartyCLIAgents => write!(f, "Third party CLI agents"),
             SettingsSection::CodeIndexing => write!(f, "Indexing and projects"),
             SettingsSection::EditorAndCodeReview => write!(f, "Editor and Code Review"),
@@ -397,6 +401,7 @@ impl SettingsSection {
             Self::AgentProfiles => "Profiles",
             Self::AgentMCPServers => "MCP servers",
             Self::Knowledge => "Knowledge",
+            Self::AgentProviders => "Agent providers",
             Self::ThirdPartyCLIAgents => "Third party CLI agents",
             Self::CodeIndexing => "Indexing and projects",
             Self::EditorAndCodeReview => "Editor and Code Review",
@@ -436,6 +441,7 @@ impl SettingsSection {
             // Agents umbrella; it differs from the current slug only by casing.
             "MCP servers" | "MCP Servers" | "AgentMCPServers" => Self::AgentMCPServers,
             "Knowledge" => Self::Knowledge,
+            "Agent providers" | "AgentProviders" => Self::AgentProviders,
             "Third party CLI agents" | "ThirdPartyCLIAgents" => Self::ThirdPartyCLIAgents,
             // "Code" named the combined page before it split in two.
             "Indexing and projects" | "CodeIndexing" | "Code" => Self::CodeIndexing,
@@ -1155,6 +1161,7 @@ macro_rules! update_page {
             SettingsPageViewHandle::WarpAgent(handle) => $ctx.update_view(handle, $update),
             SettingsPageViewHandle::AgentProfiles(handle) => $ctx.update_view(handle, $update),
             SettingsPageViewHandle::Knowledge(handle) => $ctx.update_view(handle, $update),
+            SettingsPageViewHandle::AgentProviders(handle) => $ctx.update_view(handle, $update),
             SettingsPageViewHandle::CLIAgents(handle) => $ctx.update_view(handle, $update),
             SettingsPageViewHandle::CloudEnvironments(handle) => $ctx.update_view(handle, $update),
             SettingsPageViewHandle::About(handle) => $ctx.update_view(handle, $update),
@@ -1256,6 +1263,10 @@ impl SettingsView {
         ctx.subscribe_to_view(&knowledge_page_handle, |me, _, event, ctx| {
             me.handle_knowledge_page_event(event, ctx);
         });
+
+        // Direct (BYOP) model providers page, under the Agents umbrella
+        let agent_providers_page_handle =
+            ctx.add_typed_action_view(agent_providers_page::AgentProvidersPageView::new);
 
         // Third party CLI agents page, under the Agents umbrella
         let cli_agents_page_handle = ctx.add_typed_action_view(CLIAgentsPageView::new);
@@ -1376,6 +1387,7 @@ impl SettingsView {
             SettingsPage::new(warp_agent_page_handle),
             SettingsPage::new(agent_profiles_page_handle),
             SettingsPage::new(knowledge_page_handle),
+            SettingsPage::new(agent_providers_page_handle),
             SettingsPage::new(cli_agents_page_handle),
             billing_and_usage_page,
             SettingsPage::new(code_indexing_page_handle),
@@ -1413,6 +1425,7 @@ impl SettingsView {
                     SettingsSection::AgentProfiles,
                     SettingsSection::AgentMCPServers,
                     SettingsSection::Knowledge,
+                    SettingsSection::AgentProviders,
                     SettingsSection::ThirdPartyCLIAgents,
                 ],
             )),
@@ -2128,6 +2141,7 @@ impl SettingsView {
             SettingsPageViewHandle::WarpAgent(v) => v.as_ref(app).should_render(app),
             SettingsPageViewHandle::AgentProfiles(v) => v.as_ref(app).should_render(app),
             SettingsPageViewHandle::Knowledge(v) => v.as_ref(app).should_render(app),
+            SettingsPageViewHandle::AgentProviders(v) => v.as_ref(app).should_render(app),
             SettingsPageViewHandle::CLIAgents(v) => v.as_ref(app).should_render(app),
             SettingsPageViewHandle::CloudEnvironments(v) => v.as_ref(app).should_render(app),
             SettingsPageViewHandle::MCPServers(v) => v.as_ref(app).should_render(app),
