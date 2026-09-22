@@ -27,6 +27,7 @@ use super::generate_ai_input_suggestions::{
     create_generate_ai_input_suggestions_request, get_context_messages,
 };
 use crate::ai::block_context::BlockContext;
+use crate::cloud_object::model::persistence::CloudModel;
 use crate::ai::blocklist::BlocklistAIController;
 use crate::ai_assistant::execution_context::WarpAiExecutionContext;
 use crate::completer::SessionContext;
@@ -53,6 +54,52 @@ cfg_if::cfg_if! {
 
 #[cfg_attr(not(feature = "local_fs"), allow(dead_code))]
 const MAX_NUM_SIMILAR_HISTORY_CONTEXT: usize = 25;
+
+/// Asks the user's own provider for the next-command suggestion, shaping the reply like the
+/// server's response. Used when the active model is one of the user's providers; `cfg` must be
+/// resolved before spawning, since the async body has no `AppContext`.
+async fn byop_generate_input_suggestions(
+    cfg: crate::ai::agent_providers::oneshot::OneshotConfig,
+    request: &GenerateAIInputSuggestionsRequest,
+    user_rules: Vec<(Option<String>, String)>,
+) -> Result<GenerateAIInputSuggestionsResponseV2, AIApiError> {
+    use crate::ai::agent_providers::active_ai::next_command as byop_next_command;
+
+    // `context_messages` and `history_context` both carry serialized history, so they are
+    // folded into one blob and `recent_blocks` is left empty.
+    let mut history_context = request.history_context.clone();
+    if !request.context_messages.is_empty() {
+        if !history_context.is_empty() {
+            history_context.push('\n');
+        }
+        history_context.push_str(&request.context_messages.join("\n"));
+    }
+    let input = byop_next_command::Input {
+        recent_blocks: Vec::new(),
+        history_context,
+        system_context: request.system_context.clone(),
+        prefix: request.prefix.clone(),
+        rejected_suggestions: request.rejected_suggestions.clone(),
+        user_rules,
+    };
+    let Some(command) = byop_next_command::run_with(cfg, input).await else {
+        return Ok(GenerateAIInputSuggestionsResponseV2::default());
+    };
+    // A suggestion that doesn't continue what the user typed is unusable.
+    if let Some(prefix) = request.prefix.as_deref()
+        && !command.starts_with(prefix)
+    {
+        log::debug!(
+            "[byop next_command] response {command:?} does not start with prefix {prefix:?}; dropping"
+        );
+        return Ok(GenerateAIInputSuggestionsResponseV2::default());
+    }
+    Ok(GenerateAIInputSuggestionsResponseV2 {
+        commands: vec![command.clone()],
+        ai_queries: vec![],
+        most_likely_action: command,
+    })
+}
 
 /// The number of additional preceding commands for each HistoryContext
 /// included in the LLM request.
@@ -375,6 +422,14 @@ impl NextCommandModel {
         ctx: &mut ModelContext<Self>,
     ) {
         let server_api = self.server_api.clone();
+        // Resolved before spawning: `Some` when the active model is one of the user's own
+        // providers, in which case suggestions are generated locally instead of server-side.
+        let byop_cfg = crate::ai::agent_providers::active_ai::next_command::resolve(ctx, None);
+        let user_rules = if byop_cfg.is_some() && AISettings::as_ref(ctx).is_memory_enabled(ctx) {
+            crate::ai::agent::api::collect_user_rules(CloudModel::as_ref(ctx))
+        } else {
+            Vec::new()
+        };
         let terminal_model = self.model.clone();
         let cached_next_command_context = self.cached_zerostate_next_command_context.clone();
         let team_scope =
@@ -500,9 +555,21 @@ impl NextCommandModel {
                     // For zero-state next command suggestions, return the result immediately.
                     let Some(prefix) = prefix else {
                         return (
-                            server_api
-                                .generate_ai_input_suggestions(&request, team_scope)
-                                .await,
+                            match byop_cfg.clone() {
+                                Some(cfg) => {
+                                    byop_generate_input_suggestions(
+                                        cfg,
+                                        &request,
+                                        user_rules.clone(),
+                                    )
+                                    .await
+                                }
+                                None => {
+                                    server_api
+                                        .generate_ai_input_suggestions(&request, team_scope)
+                                        .await
+                                }
+                            },
                             request,
                             true,
                             start_ts_ms,
@@ -582,9 +649,16 @@ impl NextCommandModel {
                     };
 
                     // Only if we have no commands from history and no completions, use the LLM to generate a partial suggestion.
-                    let response = server_api
-                        .generate_ai_input_suggestions(&request, team_scope)
-                        .await;
+                    let response = match byop_cfg {
+                        Some(cfg) => {
+                            byop_generate_input_suggestions(cfg, &request, user_rules).await
+                        }
+                        None => {
+                            server_api
+                                .generate_ai_input_suggestions(&request, team_scope)
+                                .await
+                        }
+                    };
                     (
                         response,
                         request,

@@ -289,6 +289,37 @@ impl PassiveSuggestionsModel {
         else {
             return;
         };
+        // When the active model is one of the user's own providers, generate the suggestion
+        // there instead of asking Warp's server.
+        if let Some(rendered) = build_prompt_suggestions_byop_request(
+            &block_completed,
+            execution_context.clone(),
+            &self.terminal_model,
+            self.terminal_view_id,
+            ctx,
+        ) {
+            let request_future = async move {
+                crate::ai::agent_providers::active_ai::prompt_suggestions::run(rendered).await
+            };
+            self.prompt_suggestions_future_handle =
+                Some(ctx.spawn(request_future, move |me, result, ctx| {
+                    me.prompt_suggestions_future_handle = None;
+                    let end_ts_ms = Utc::now().timestamp_millis();
+                    let request_duration_ms = end_ts_ms.saturating_sub(start_ts_ms) as u64;
+                    let prompt_suggestion = match result {
+                        Some(response) => map_prompt_suggestions_response(response),
+                        None => AgentModePromptSuggestion::Error,
+                    };
+                    ctx.emit(PassiveSuggestionsEvent::PromptSuggestionsGenerated {
+                        prompt_suggestion: prompt_suggestion.clone(),
+                        block_id: block_id.clone(),
+                        command,
+                        request_duration_ms,
+                    });
+                }));
+            return;
+        }
+
         let Some(request) = build_prompt_suggestions_request(
             &block_completed,
             execution_context,
@@ -714,6 +745,55 @@ fn build_prompt_suggestions_request(
         system_context: execution_context.to_json_string(),
         exit_code: exit_code.value(),
     })
+}
+
+/// Builds the prompt-suggestions request for the user's own provider: block summary plus
+/// system context, rendered by `active_ai::prompt_suggestions::dispatch`. `None` means the
+/// active model is not a provider model, or the block's content is gone, and the caller
+/// falls back to the server path.
+fn build_prompt_suggestions_byop_request(
+    block: &UserBlockCompleted,
+    execution_context: WarpAiExecutionContext,
+    terminal_model: &Arc<FairMutex<TerminalModel>>,
+    terminal_view_id: EntityId,
+    ctx: &warpui::AppContext,
+) -> Option<crate::ai::agent_providers::active_ai::RenderedRequest> {
+    use crate::ai::agent_providers::active_ai::{prompt_suggestions, BlockSnippet};
+
+    let serialized_block = block.serialized_block.get_with(|compute| {
+        let model = terminal_model.lock();
+        compute(model.block_list())
+    });
+    let exit_code = serialized_block.exit_code;
+    let working_dir = serialized_block.pwd.as_ref().cloned().unwrap_or_default();
+
+    let (processed_input, processed_output) = {
+        let model = terminal_model.lock();
+        let terminal_width = model.block_list().size().columns();
+        let current_block = model.block_list().block_with_id(&serialized_block.id)?;
+        current_block.get_block_content_summary(
+            terminal_width,
+            NUM_TOP_BLOCK_LINES,
+            NUM_BOTTOM_BLOCK_LINES,
+        )
+    };
+
+    let snippet = BlockSnippet {
+        command: processed_input,
+        output_summary: processed_output,
+        exit_code: exit_code.value(),
+        pwd: working_dir,
+    };
+
+    prompt_suggestions::dispatch(
+        ctx,
+        Some(terminal_view_id),
+        prompt_suggestions::Input {
+            recent_blocks: vec![snippet],
+            system_context: execution_context.to_json_string(),
+            last_exit_code: exit_code.value(),
+        },
+    )
 }
 
 fn map_prompt_suggestions_response(
