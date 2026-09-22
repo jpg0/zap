@@ -237,6 +237,50 @@ fn byop_output_input(
     }
 }
 
+/// Everything needed to ask the provider for a conversation title once the stream finishes.
+pub(super) struct PendingTitleGeneration {
+    pub(super) input: crate::ai::agent_providers::chat_stream::TitleGenInput,
+    pub(super) user_query: String,
+    pub(super) task_id: String,
+}
+
+/// Builds the title request for a BYOP conversation's first turn, or `None` when the request
+/// is not BYOP, the conversation already has a task on the server, or there is no user query
+/// to name it after.
+fn pending_title_generation(
+    params: &api::RequestParams,
+    ctx: &warpui::AppContext,
+) -> Option<PendingTitleGeneration> {
+    use crate::ai::agent::AIAgentInput;
+    use crate::ai::llms::LLMPreferences;
+
+    let target = byop_target(params, ctx)?;
+    if !target.needs_create_task {
+        return None;
+    }
+    let user_query = params.input.iter().find_map(|input| match input {
+        AIAgentInput::UserQuery { query, .. } => Some(query.clone()),
+        _ => None,
+    })?;
+    let llm_preferences = LLMPreferences::as_ref(ctx);
+    let title_model_id = llm_preferences.get_active_title_model(ctx, None).id.clone();
+    let (provider, api_key, model_id) =
+        crate::ai::agent_providers::lookup_byop(ctx, &title_model_id)?;
+    let reasoning_effort =
+        llm_preferences.get_reasoning_effort(None, provider.api_type, &model_id);
+    Some(PendingTitleGeneration {
+        input: crate::ai::agent_providers::chat_stream::TitleGenInput {
+            base_url: provider.base_url,
+            api_key,
+            model_id,
+            api_type: provider.api_type,
+            reasoning_effort,
+        },
+        user_query,
+        task_id: target.root_task_id,
+    })
+}
+
 struct ByopTarget {
     provider: crate::settings::AgentProvider,
     api_key: String,
@@ -401,6 +445,11 @@ pub struct ResponseStream {
     /// Captured once at construction, so retries keep the team the request started on.
     team_scope: RequestTeamScope,
 
+    /// Title generation for a direct-provider request's first turn. Warp's server names
+    /// conversations itself, so a BYOP conversation asks the provider once the stream
+    /// completes. Taken by the controller in [`Self::take_pending_title_generation`].
+    pending_title_generation: Option<PendingTitleGeneration>,
+
     #[cfg(test)]
     suppress_request_spawn: bool,
 }
@@ -466,6 +515,7 @@ impl ResponseStream {
             deferred_retry_pending: false,
             current_request_id: Some(Uuid::new_v4()),
             team_scope: RequestTeamScope::from_scope(&TeamlessScopeForTest),
+            pending_title_generation: None,
             suppress_request_spawn: true,
         }
     }
@@ -481,10 +531,12 @@ impl ResponseStream {
         let start_time = Local::now();
 
         let request_id = Uuid::new_v4();
+        let pending_title_generation = pending_title_generation(&params, ctx);
         Self::spawn_request(request_id, params.clone(), team_scope, cancellation_rx, ctx);
         Self {
             id: ResponseStreamId(Uuid::new_v4().to_string()),
             params,
+            pending_title_generation,
             start_time,
             time_to_latest_event: TimeDelta::seconds(0),
             cancellation_tx: Some(cancellation_tx),
@@ -502,6 +554,35 @@ impl ResponseStream {
             #[cfg(test)]
             suppress_request_spawn: false,
         }
+    }
+
+    /// Takes the pending title generation, if this was a direct-provider request whose
+    /// conversation still needs a name.
+    pub(super) fn take_pending_title_generation(&mut self) -> Option<PendingTitleGeneration> {
+        self.pending_title_generation.take()
+    }
+
+    /// Whether this request went to a user-configured provider rather than Warp's servers.
+    /// `compaction_state` is only populated for those requests.
+    pub(super) fn is_byop_request(&self) -> bool {
+        self.params.compaction_state.is_some()
+    }
+
+    /// The model this request was sent to, used to look up its configured context window.
+    pub(super) fn model_id(&self) -> &crate::ai::llms::LLMId {
+        &self.params.model
+    }
+
+    /// Whether this was a direct-provider summarization turn, whose result should be committed
+    /// to the conversation's compaction state.
+    pub(super) fn is_byop_summarization(&self) -> bool {
+        self.is_byop_request()
+            && self.params.input.iter().any(|input| {
+                matches!(
+                    input,
+                    crate::ai::agent::AIAgentInput::SummarizeConversation { .. }
+                )
+            })
     }
 
     pub fn id(&self) -> &ResponseStreamId {

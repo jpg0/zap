@@ -502,6 +502,8 @@ impl BlocklistAIController {
             finished,
             conversation_id,
             did_exchange_contain_user_query,
+            // Shared-session replay never involves a direct-provider request.
+            Default::default(),
             ctx,
         );
     }

@@ -36,7 +36,8 @@ use self::response_stream::{PendingResume, RecoveryBudget, ResponseStream, Respo
 use super::action_model::{BlocklistAIActionEvent, BlocklistAIActionModel};
 use super::context_model::{BlocklistAIContextModel, PendingAttachment, PendingFile};
 use super::conversation_selection::{ConversationSelectionEvent, ConversationSelectionHandle};
-use super::history_model::BlocklistAIHistoryModel;
+use super::controller::response_stream::PendingTitleGeneration;
+use super::history_model::{BlocklistAIHistoryEvent, BlocklistAIHistoryModel};
 use super::orchestration_event_streamer::{
     OrchestrationEventStreamer, OrchestrationEventStreamerEvent,
 };
@@ -400,6 +401,56 @@ pub struct BlocklistAIController {
     /// live actions finish, so the user's prompt is not silently dropped. At most one per
     /// conversation; a newer request from the user replaces it.
     pending_byop_requests: HashMap<AIConversationId, PendingByopRequest>,
+    /// Conversations whose in-flight summarization was triggered automatically by context
+    /// overflow rather than by the user, recorded so the committed summary is marked as such.
+    byop_overflow_summarizations: HashSet<AIConversationId>,
+}
+
+/// Whether a finished response stream came from a user-configured provider, and whether it
+/// was that provider summarizing the conversation.
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct ByopStreamKind {
+    is_byop_request: bool,
+    is_summarization: bool,
+    /// The provider model's configured context window, when it declares one.
+    context_window: Option<usize>,
+}
+
+impl ByopStreamKind {
+    fn for_stream(response_stream: &ResponseStream, app: &AppContext) -> Self {
+        let is_byop_request = response_stream.is_byop_request();
+        let context_window = is_byop_request
+            .then(|| {
+                let (provider, _, model_id) =
+                    crate::ai::agent_providers::lookup_byop(app, response_stream.model_id())?;
+                provider
+                    .models
+                    .iter()
+                    .find(|model| model.id == model_id)
+                    .map(|model| model.context_window as usize)
+                    .filter(|context_window| *context_window > 0)
+            })
+            .flatten();
+        Self {
+            is_byop_request,
+            is_summarization: response_stream.is_byop_summarization(),
+            context_window,
+        }
+    }
+
+    /// The token limits to judge overflow against: the model's configured context window when
+    /// it declares one, otherwise the conservative fallback.
+    fn model_limit(&self) -> crate::ai::byop_compaction::overflow::ModelLimit {
+        use crate::ai::byop_compaction::overflow::ModelLimit;
+        match self.context_window {
+            Some(context) => ModelLimit {
+                context,
+                input: 0,
+                max_output: ModelLimit::FALLBACK.max_output.min(context / 10),
+            },
+            None => ModelLimit::FALLBACK,
+        }
+    }
 }
 
 /// See `pending_byop_requests`.
@@ -724,6 +775,7 @@ impl BlocklistAIController {
             pending_passive_follow_ups: HashSet::new(),
             pending_passive_suggestion_results: HashMap::new(),
             pending_byop_requests: HashMap::new(),
+            byop_overflow_summarizations: HashSet::new(),
         }
     }
 
@@ -4306,11 +4358,35 @@ impl BlocklistAIController {
                             warp_multi_agent_api::response_event::Type::Finished(
                                 finished_event,
                             ) => {
+                                let completed_successfully = matches!(
+                                    finished_event.reason.as_ref(),
+                                    Some(
+                                        warp_multi_agent_api::response_event::stream_finished::Reason::Done(_)
+                                    ) | None
+                                );
+                                if completed_successfully
+                                    && let Some(pending_title_generation) =
+                                        response_stream.update(ctx, |response_stream, _| {
+                                            response_stream.take_pending_title_generation()
+                                        })
+                                {
+                                    self.start_byop_title_generation(
+                                        pending_title_generation,
+                                        stream_id.clone(),
+                                        conversation_id,
+                                        ctx,
+                                    );
+                                }
+                                let byop_stream = ByopStreamKind::for_stream(
+                                    response_stream.as_ref(ctx),
+                                    ctx,
+                                );
                                 self.handle_response_stream_finished(
                                     &stream_id,
                                     finished_event,
                                     conversation_id,
                                     did_input_contain_user_query,
+                                    byop_stream,
                                     ctx,
                                 );
                             }
@@ -4624,14 +4700,82 @@ impl BlocklistAIController {
         }
     }
 
+    /// Asks the provider to name a conversation once its first direct-provider stream
+    /// finishes. Warp's server does this itself for its own models.
+    fn start_byop_title_generation(
+        &mut self,
+        pending_title_generation: PendingTitleGeneration,
+        stream_id: ResponseStreamId,
+        conversation_id: AIConversationId,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let terminal_surface_id = self.terminal_surface_id;
+        let skill_path_origin =
+            SessionContext::from_session(self.active_session.as_ref(ctx), ctx).skill_path_origin();
+        let _ = ctx.spawn(
+            async move {
+                let result = crate::ai::agent_providers::chat_stream::generate_title_via_byop(
+                    &pending_title_generation.input,
+                    &pending_title_generation.user_query,
+                )
+                .await;
+                (pending_title_generation.task_id, result)
+            },
+            move |_me, (task_id, result), ctx| match result {
+                Ok(Some(title)) => {
+                    let client_actions = vec![warp_multi_agent_api::ClientAction {
+                        action: Some(
+                            warp_multi_agent_api::client_action::Action::UpdateTaskDescription(
+                                warp_multi_agent_api::client_action::UpdateTaskDescription {
+                                    task_id,
+                                    description: title,
+                                },
+                            ),
+                        ),
+                    }];
+                    BlocklistAIHistoryModel::handle(ctx).update(ctx, |history_model, ctx| {
+                        match history_model.apply_client_actions(
+                            &stream_id,
+                            client_actions,
+                            conversation_id,
+                            terminal_surface_id,
+                            &skill_path_origin,
+                            ctx,
+                        ) {
+                            Ok(()) => {
+                                ctx.emit(BlocklistAIHistoryEvent::UpdatedConversationMetadata {
+                                    terminal_surface_id: Some(terminal_surface_id),
+                                    conversation_id,
+                                });
+                            }
+                            Err(e) => log::warn!("[byop] title update failed: {e:#}"),
+                        }
+                    });
+                }
+                Ok(None) => log::debug!("[byop] title generation returned no content; skipped"),
+                Err(e) => log::warn!("[byop] title generation failed: {e:#}; skipped"),
+            },
+        );
+    }
+
     pub(super) fn handle_response_stream_finished(
         &mut self,
         stream_id: &ResponseStreamId,
         mut finished_event: warp_multi_agent_api::response_event::StreamFinished,
         conversation_id: AIConversationId,
         did_request_contain_user_query: bool,
+        byop_stream: ByopStreamKind,
         ctx: &mut ModelContext<Self>,
     ) {
+        // Aggregate before `token_usage` moves into the update closure below; used for the
+        // direct-provider context-overflow check.
+        let aggregate_token_count: usize = finished_event
+            .token_usage
+            .iter()
+            .map(|u| (u.total_input + u.output + u.input_cache_read + u.input_cache_write) as usize)
+            .max()
+            .unwrap_or(0);
+
         let history_model = BlocklistAIHistoryModel::handle(ctx);
         history_model.update(ctx, |history_model, ctx| {
             // Update conversation cost and usage information before updating and
@@ -4655,6 +4799,20 @@ impl BlocklistAIController {
         let history_model = BlocklistAIHistoryModel::handle(ctx);
         match finished_event.reason {
             Some(warp_multi_agent_api::response_event::stream_finished::Reason::Done(_)) | None => {
+                if byop_stream.is_summarization {
+                    let overflow = self.byop_overflow_summarizations.remove(&conversation_id);
+                    let compaction_cfg =
+                        crate::ai::byop_compaction::CompactionConfig::from_settings(ctx);
+                    history_model.update(ctx, |history_model, _ctx| {
+                        if let Some(convo) = history_model.conversation_mut(&conversation_id) {
+                            crate::ai::byop_compaction::commit::commit_summarization(
+                                convo,
+                                overflow,
+                                &compaction_cfg,
+                            );
+                        }
+                    });
+                }
                 history_model.update(ctx, |history_model, ctx| {
                     history_model.mark_response_stream_completed_successfully(
                         stream_id,
@@ -4663,6 +4821,32 @@ impl BlocklistAIController {
                         ctx,
                     );
                 });
+
+                // Summarize automatically once a direct-provider conversation outgrows the
+                // model's usable context. Skipped while summarizing, so it cannot recurse.
+                if byop_stream.is_byop_request
+                    && !byop_stream.is_summarization
+                    && aggregate_token_count > 0
+                {
+                    let cfg = crate::ai::byop_compaction::CompactionConfig::from_settings(ctx);
+                    let model_limit = byop_stream.model_limit();
+                    let counts = crate::ai::byop_compaction::overflow::TokenCounts {
+                        total: aggregate_token_count,
+                        ..Default::default()
+                    };
+                    if crate::ai::byop_compaction::is_overflow(&cfg, counts, model_limit) {
+                        log::info!(
+                            "[byop-compaction] auto overflow detected: \
+                             tokens={aggregate_token_count} usable={}",
+                            crate::ai::byop_compaction::usable(&cfg, model_limit)
+                        );
+                        self.byop_overflow_summarizations.insert(conversation_id);
+                        self.send_slash_command_request(
+                            SlashCommandRequest::Summarize { prompt: None },
+                            ctx,
+                        );
+                    }
+                }
             }
             Some(warp_multi_agent_api::response_event::stream_finished::Reason::Other(_)) => {
                 let error_message = "Response stream finished unexpectedly (with finish reason `Other`).";
