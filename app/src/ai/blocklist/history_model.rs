@@ -1215,6 +1215,24 @@ impl BlocklistAIHistoryModel {
         Ok(())
     }
 
+    /// Appends BYOP preflight tool-result messages to `task_id`, persisting them so later
+    /// turns see the results the client produced locally.
+    pub fn append_byop_preflight_messages_to_task(
+        &mut self,
+        conversation_id: AIConversationId,
+        task_id: TaskId,
+        messages: Vec<warp_multi_agent_api::Message>,
+        ctx: &mut ModelContext<Self>,
+    ) -> Result<usize, UpdateHistoryError> {
+        let conversation = self
+            .conversations_by_id
+            .get_mut(&conversation_id)
+            .ok_or(UpdateHistoryError::ConversationNotFound(conversation_id))?;
+        conversation
+            .append_byop_preflight_messages_to_task(task_id, messages, ctx)
+            .map_err(UpdateHistoryError::from)
+    }
+
     pub fn restore_conversations(
         &mut self,
         terminal_surface_id: EntityId,

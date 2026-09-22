@@ -319,6 +319,12 @@ fn byop_target(params: &api::RequestParams, ctx: &warpui::AppContext) -> Option<
 pub struct ResponseStreamId(String);
 
 impl ResponseStreamId {
+    /// A locally generated id for a stream that never reaches a provider, such as a BYOP
+    /// request blocked by the readiness preflight.
+    pub fn new_local() -> Self {
+        Self(Uuid::new_v4().to_string())
+    }
+
     pub fn for_shared_session(init_event: &response_event::StreamInit) -> Self {
         // Make the stream ID unique per viewing by appending a local UUID
         // This prevents collisions when replaying the same conversation multiple times
@@ -328,7 +334,7 @@ impl ResponseStreamId {
 
     #[cfg(test)]
     pub fn new_for_test() -> Self {
-        Self(Uuid::new_v4().to_string())
+        Self::new_local()
     }
 }
 

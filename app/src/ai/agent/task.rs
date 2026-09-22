@@ -647,6 +647,28 @@ impl Task {
         Ok(())
     }
 
+    /// Appends messages to the task source without touching exchanges. Used by the BYOP
+    /// preflight, which persists tool results the client produced locally.
+    pub(super) fn append_source_messages(
+        &mut self,
+        messages: Vec<api::Message>,
+    ) -> Result<(), UpdateTaskError> {
+        self.try_get_source_mut()?.messages.extend(messages);
+        Ok(())
+    }
+
+    /// Removes messages by id, used to roll back an [`Self::append_source_messages`] that
+    /// could not be persisted.
+    pub(super) fn remove_source_messages_by_ids(
+        &mut self,
+        message_ids: &std::collections::HashSet<String>,
+    ) -> Result<(), UpdateTaskError> {
+        self.try_get_source_mut()?
+            .messages
+            .retain(|message| !message_ids.contains(&message.id));
+        Ok(())
+    }
+
     /// Upserts `message` into the task, returning the exchange whose rendered output was
     /// updated along with the resulting task message.
     ///

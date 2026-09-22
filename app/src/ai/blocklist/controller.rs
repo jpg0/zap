@@ -59,6 +59,11 @@ use crate::ai::agent_events::AgentMessageEventMetadata;
 #[cfg(not(target_family = "wasm"))]
 use crate::ai::agent_sdk::ClaudeHarness;
 use crate::ai::ambient_agents::AmbientAgentTaskId;
+use crate::ai::byop_readiness::{
+    BLOCKED_BYOP_REQUEST_MESSAGE, BlockedByopReadinessError, PendingByopToolResultsError,
+    ReadinessCategory, ReadinessDiagnosticCoalescer, ReadinessDiagnosticContext,
+    ReadinessDiagnosticLevel, ReadinessTriggerLayer,
+};
 use crate::ai::document::ai_document_model::{
     AIDocumentId, AIDocumentModel, AIDocumentUserEditStatus,
 };
@@ -212,6 +217,12 @@ pub struct RequestInput {
     pub supported_tools_override: Option<Vec<ToolType>>,
 }
 
+/// Upper bound on BYOP preflight passes. Each pass can make one kind of progress (dropping
+/// already-persisted results, committing current or finished results, or committing a
+/// cancellation), so a normal turn needs a couple; the bound keeps a genuine loop from spinning
+/// silently and reports the request as blocked instead.
+const BYOP_PREFLIGHT_MAX_ITERATIONS: usize = 6;
+
 impl RequestInput {
     #[allow(clippy::too_many_arguments)]
     fn for_task(
@@ -274,6 +285,21 @@ impl RequestInput {
     pub fn with_supported_tools(mut self, tools: Vec<ToolType>) -> Self {
         self.supported_tools_override = Some(tools);
         self
+    }
+
+    fn remove_action_results_by_tool_call_id(&mut self, keys: &HashSet<(String, String)>) -> usize {
+        let mut removed = 0;
+        for inputs in self.input_messages.values_mut() {
+            let before = inputs.len();
+            inputs.retain(|input| {
+                let AIAgentInput::ActionResult { result, .. } = input else {
+                    return true;
+                };
+                !keys.contains(&(result.task_id.to_string(), result.id.to_string()))
+            });
+            removed += before - inputs.len();
+        }
+        removed
     }
 
     fn new_with_common_fields(
@@ -369,6 +395,19 @@ pub struct BlocklistAIController {
             Option<PassiveSuggestionTrigger>,
         )>,
     >,
+    /// BYOP requests deferred because readiness reported pending tool results. The request is
+    /// re-sent by `flush_pending_byop_request_after_finished_action` once the conversation's
+    /// live actions finish, so the user's prompt is not silently dropped. At most one per
+    /// conversation; a newer request from the user replaces it.
+    pending_byop_requests: HashMap<AIConversationId, PendingByopRequest>,
+}
+
+/// See `pending_byop_requests`.
+struct PendingByopRequest {
+    request_input: RequestInput,
+    query_metadata: Option<RequestMetadata>,
+    recovery: RecoveryBudget,
+    is_queued_prompt: bool,
 }
 
 enum InputQueryType {
@@ -588,6 +627,14 @@ impl BlocklistAIController {
                 });
                 return;
             }
+            // Prefer re-sending the BYOP request deferred by the readiness preflight (it holds
+            // the user's original prompt); otherwise take the normal follow-up path.
+            if me.flush_pending_byop_request_after_finished_action(*conversation_id, ctx) {
+                QueuedQueryModel::handle(ctx).update(ctx, |model, ctx| {
+                    model.unlock_pending_lrc_rows(*conversation_id, ctx);
+                });
+                return;
+            }
             me.send_follow_up_for_conversation(*conversation_id, ctx);
             // Unlock any query queued during the pre-snapshot window now that the
             // snapshot has been sent.
@@ -676,6 +723,7 @@ impl BlocklistAIController {
             pending_local_claude_wakes: HashMap::new(),
             pending_passive_follow_ups: HashSet::new(),
             pending_passive_suggestion_results: HashMap::new(),
+            pending_byop_requests: HashMap::new(),
         }
     }
 
@@ -2590,6 +2638,912 @@ impl BlocklistAIController {
             .expect("Conversation exists- was just created.")
     }
 
+    fn remove_persisted_byop_action_results_from_input(
+        &self,
+        conversation_id: AIConversationId,
+        request_input: &mut RequestInput,
+        ctx: &mut ModelContext<Self>,
+    ) -> usize {
+        let keys = request_input
+            .all_inputs()
+            .filter_map(|input| {
+                let AIAgentInput::ActionResult { result, .. } = input else {
+                    return None;
+                };
+                let task_id = result.task_id.to_string();
+                let tool_call_id = result.id.to_string();
+                self.has_persisted_tool_result(conversation_id, &task_id, &tool_call_id, ctx)
+                    .then_some((task_id, tool_call_id))
+            })
+            .collect::<HashSet<_>>();
+        request_input.remove_action_results_by_tool_call_id(&keys)
+    }
+
+    fn commit_byop_current_action_results(
+        &self,
+        conversation_id: AIConversationId,
+        request_input: &mut RequestInput,
+        request_params: &api::RequestParams,
+        ctx: &mut ModelContext<Self>,
+    ) -> anyhow::Result<usize> {
+        let visible_tool_calls = Self::visible_byop_tool_result_keys(request_params);
+        let results = request_input
+            .all_inputs()
+            .filter_map(|input| {
+                let AIAgentInput::ActionResult { result, .. } = input else {
+                    return None;
+                };
+                if result.result.is_cancelled() {
+                    return None;
+                }
+                visible_tool_calls
+                    .contains(&(result.task_id.to_string(), result.id.to_string()))
+                    .then(|| result.clone())
+            })
+            .collect_vec();
+        let keys_to_remove = Self::action_result_keys(&results);
+        let appended = self.append_byop_action_result_messages(conversation_id, &results, ctx)?;
+        let removed = request_input.remove_action_results_by_tool_call_id(&keys_to_remove);
+        Ok(appended + removed)
+    }
+
+    fn commit_byop_finished_action_results(
+        &self,
+        conversation_id: AIConversationId,
+        request_params: &api::RequestParams,
+        ctx: &mut ModelContext<Self>,
+    ) -> anyhow::Result<usize> {
+        let visible_tool_calls = Self::visible_byop_tool_result_keys(request_params);
+        let results = self
+            .action_model
+            .as_ref(ctx)
+            .finished_action_results_matching(conversation_id, &visible_tool_calls);
+        let keys_to_remove = Self::action_result_keys(&results);
+        let appended = self.append_byop_action_result_messages(conversation_id, &results, ctx)?;
+        let removed = self.action_model.update(ctx, |action_model, _| {
+            action_model.remove_finished_action_results_matching(conversation_id, &keys_to_remove)
+        });
+        Ok(appended + removed)
+    }
+
+    fn append_byop_action_result_messages(
+        &self,
+        conversation_id: AIConversationId,
+        results: &[AIAgentActionResult],
+        ctx: &mut ModelContext<Self>,
+    ) -> anyhow::Result<usize> {
+        let request_id = format!("byop-preflight:{}", uuid::Uuid::new_v4());
+        let mut grouped_messages: HashMap<TaskId, Vec<warp_multi_agent_api::Message>> =
+            HashMap::new();
+        for result in results {
+            let task_id = result.task_id.to_string();
+            let tool_call_id = result.id.to_string();
+            if self.has_persisted_tool_result(conversation_id, &task_id, &tool_call_id, ctx) {
+                continue;
+            }
+            grouped_messages
+                .entry(result.task_id.clone())
+                .or_default()
+                .push(Self::byop_action_result_message(&request_id, result));
+        }
+
+        let mut appended = 0;
+        for (task_id, messages) in grouped_messages {
+            appended +=
+                BlocklistAIHistoryModel::handle(ctx).update(ctx, |history_model, ctx| {
+                    history_model.append_byop_preflight_messages_to_task(
+                        conversation_id,
+                        task_id,
+                        messages,
+                        ctx,
+                    )
+                })?;
+        }
+        Ok(appended)
+    }
+
+    fn byop_unfinished_live_tool_calls(
+        &self,
+        conversation_id: AIConversationId,
+        request_params: &api::RequestParams,
+        ctx: &mut ModelContext<Self>,
+    ) -> Vec<crate::ai::byop_readiness::LiveToolCall> {
+        use crate::ai::agent::task::helper::{ToolCallExt, ToolExt};
+
+        request_params
+            .tasks
+            .iter()
+            .flat_map(|task| task.messages.iter())
+            .filter_map(|msg| {
+                let message::Message::ToolCall(tool_call) = msg.message.as_ref()? else {
+                    return None;
+                };
+                if tool_call.subagent().is_some()
+                    || !self
+                        .action_model
+                        .as_ref(ctx)
+                        .has_unfinished_action_for_tool_call(
+                            conversation_id,
+                            &msg.task_id,
+                            &tool_call.tool_call_id,
+                            ctx,
+                        )
+                {
+                    return None;
+                }
+                Some(crate::ai::byop_readiness::LiveToolCall::new(
+                    crate::ai::byop_readiness::ToolCallRef::new(
+                        crate::ai::byop_readiness::ToolCallKey::new(
+                            &msg.task_id,
+                            &msg.id,
+                            &tool_call.tool_call_id,
+                        ),
+                        crate::ai::byop_readiness::RedactedToolKind::new(
+                            tool_call
+                                .tool
+                                .as_ref()
+                                .map(|tool| tool.name())
+                                .unwrap_or("unknown"),
+                        ),
+                    ),
+                    crate::ai::byop_readiness::LiveToolCallState::Running,
+                ))
+            })
+            .collect()
+    }
+
+    fn visible_byop_tool_result_keys(
+        request_params: &api::RequestParams,
+    ) -> HashSet<(String, String)> {
+        use crate::ai::agent::task::helper::ToolCallExt;
+
+        request_params
+            .tasks
+            .iter()
+            .flat_map(|task| task.messages.iter())
+            .filter_map(|msg| {
+                let message::Message::ToolCall(tool_call) = msg.message.as_ref()? else {
+                    return None;
+                };
+                if tool_call.subagent().is_some() {
+                    return None;
+                }
+                Some((msg.task_id.clone(), tool_call.tool_call_id.clone()))
+            })
+            .collect()
+    }
+
+    fn action_result_keys(results: &[AIAgentActionResult]) -> HashSet<(String, String)> {
+        results
+            .iter()
+            .map(|result| (result.task_id.to_string(), result.id.to_string()))
+            .collect()
+    }
+
+    fn commit_byop_cancellation_results(
+        &self,
+        conversation_id: AIConversationId,
+        request_input: &mut RequestInput,
+        tool_calls: &[crate::ai::byop_readiness::ToolCallRef],
+        ctx: &mut ModelContext<Self>,
+    ) -> anyhow::Result<usize> {
+        // `ToolCallKey` is (task_id, assistant_message_id, tool_call_id), but action results and
+        // persisted `ToolCallResult`s carry only (task_id, tool_call_id). Match on that pair and
+        // keep the expected assistant message ids alongside, warning rather than blocking if the
+        // protocol assumption that tool_call_id is unique per conversation is ever violated.
+        let mut wanted: HashMap<(String, String), HashSet<String>> = HashMap::new();
+        for tool_call in tool_calls {
+            wanted
+                .entry((
+                    tool_call.key.task_id.clone(),
+                    tool_call.key.tool_call_id.clone(),
+                ))
+                .or_default()
+                .insert(tool_call.key.assistant_tool_call_message_id.clone());
+        }
+        for ((task_id, tool_call_id), assistant_message_ids) in &wanted {
+            if assistant_message_ids.len() > 1 {
+                log::warn!(
+                    "[byop-readiness] commit_byop_cancellation_results saw duplicate tool_call_id \
+                     across multiple assistant messages task_id={task_id} \
+                     tool_call_id={tool_call_id} assistant_message_id_count={}",
+                    assistant_message_ids.len()
+                );
+            }
+        }
+        let request_id = format!("byop-preflight:{}", uuid::Uuid::new_v4());
+        let mut grouped_messages: HashMap<TaskId, Vec<warp_multi_agent_api::Message>> =
+            HashMap::new();
+        let mut keys_to_remove = HashSet::new();
+        // An already-persisted cancellation result still counts as progress; otherwise a
+        // readiness state of NeedsCancellationCommit with no matching entry left in
+        // request_input would look like zero progress and block a request that would converge.
+        let mut already_persisted = 0usize;
+
+        for input in request_input.all_inputs() {
+            let AIAgentInput::ActionResult { result, .. } = input else {
+                continue;
+            };
+            if !result.result.is_cancelled() {
+                continue;
+            }
+
+            let task_id = result.task_id.to_string();
+            let tool_call_id = result.id.to_string();
+            let key = (task_id.clone(), tool_call_id.clone());
+            if !wanted.contains_key(&key) {
+                continue;
+            }
+
+            keys_to_remove.insert(key.clone());
+            if self.has_persisted_tool_result(conversation_id, &task_id, &tool_call_id, ctx) {
+                already_persisted += 1;
+                continue;
+            }
+
+            grouped_messages
+                .entry(result.task_id.clone())
+                .or_default()
+                .push(Self::byop_action_result_message(&request_id, result));
+        }
+
+        let mut appended = 0;
+        for (task_id, messages) in grouped_messages {
+            appended +=
+                BlocklistAIHistoryModel::handle(ctx).update(ctx, |history_model, ctx| {
+                    history_model.append_byop_preflight_messages_to_task(
+                        conversation_id,
+                        task_id,
+                        messages,
+                        ctx,
+                    )
+                })?;
+        }
+
+        let removed = request_input.remove_action_results_by_tool_call_id(&keys_to_remove);
+        Ok(appended + removed + already_persisted)
+    }
+
+    fn synthesize_byop_missing_cancellation_results(
+        &self,
+        conversation_id: AIConversationId,
+        tool_calls: &[crate::ai::byop_readiness::ToolCallRef],
+        ctx: &mut ModelContext<Self>,
+    ) -> anyhow::Result<usize> {
+        let request_id = format!("byop-preflight:{}", uuid::Uuid::new_v4());
+        let mut grouped_messages: HashMap<TaskId, Vec<warp_multi_agent_api::Message>> =
+            HashMap::new();
+        for tool_call in tool_calls {
+            let task_id = &tool_call.key.task_id;
+            let tool_call_id = &tool_call.key.tool_call_id;
+            // Skip pairs that already have a persisted result so no duplicate is written.
+            if self.has_persisted_tool_result(conversation_id, task_id, tool_call_id, ctx) {
+                continue;
+            }
+            grouped_messages
+                .entry(TaskId::new(task_id.clone()))
+                .or_default()
+                .push(Self::byop_synthetic_cancellation_message(
+                    &request_id,
+                    task_id,
+                    tool_call_id,
+                ));
+        }
+
+        let mut appended = 0;
+        for (task_id, messages) in grouped_messages {
+            appended +=
+                BlocklistAIHistoryModel::handle(ctx).update(ctx, |history_model, ctx| {
+                    history_model.append_byop_preflight_messages_to_task(
+                        conversation_id,
+                        task_id,
+                        messages,
+                        ctx,
+                    )
+                })?;
+        }
+        Ok(appended)
+    }
+
+    fn byop_synthetic_cancellation_message(
+        request_id: &str,
+        task_id: &str,
+        tool_call_id: &str,
+    ) -> warp_multi_agent_api::Message {
+        let server_message_data = serde_json::json!({
+            "status": "cancelled",
+            "reason": "interrupted_by_user",
+        })
+        .to_string();
+        warp_multi_agent_api::Message {
+            id: uuid::Uuid::new_v4().to_string(),
+            task_id: task_id.to_owned(),
+            server_message_data,
+            citations: vec![],
+            message: Some(message::Message::ToolCallResult(message::ToolCallResult {
+                tool_call_id: tool_call_id.to_owned(),
+                context: None,
+                result: None,
+            })),
+            request_id: request_id.to_owned(),
+            timestamp: None,
+            ..Default::default()
+        }
+    }
+
+    fn populate_lrc_request_params(
+        &self,
+        request_params: &mut api::RequestParams,
+        conversation_id: AIConversationId,
+    ) {
+        let terminal_model = self.terminal_model.lock();
+        let active_block = terminal_model.block_list().active_block();
+        let is_lrc_tagged_in = active_block.is_agent_tagged_in();
+        let is_matching_lrc_agent = active_block.is_agent_in_control()
+            && active_block
+                .agent_interaction_metadata()
+                .is_some_and(|metadata| metadata.conversation_id() == &conversation_id);
+        if !is_lrc_tagged_in && !is_matching_lrc_agent {
+            return;
+        }
+
+        request_params.lrc_command_id = Some(active_block.id().to_string());
+        request_params.lrc_should_spawn_subagent = is_lrc_tagged_in;
+
+        if let Some(running_command) = byop_get_running_command_for_lrc(&terminal_model) {
+            request_params.lrc_running_command = Some(running_command.clone());
+            let total_inputs = request_params.input.len();
+            let mut filled_count = 0usize;
+            for input in request_params.input.iter_mut() {
+                if let crate::ai::agent::AIAgentInput::UserQuery {
+                    running_command: rc_slot @ None,
+                    ..
+                } = input
+                {
+                    *rc_slot = Some(running_command.clone());
+                    filled_count += 1;
+                }
+            }
+            log::info!(
+                "[byop-diag] LRC running_command filled: {filled_count}/{total_inputs} \
+                 UserQuery slot(s); should_spawn={} grid_contents_len={} command={:?} is_alt_screen={}",
+                request_params.lrc_should_spawn_subagent,
+                running_command.grid_contents.len(),
+                running_command.command,
+                running_command.is_alt_screen_active
+            );
+        } else {
+            log::warn!(
+                "[byop-diag] LRC detected but byop_get_running_command_for_lrc \
+                 returned None (active_block not in a matching state)"
+            );
+        }
+    }
+
+    fn run_byop_request_preflight(
+        &mut self,
+        request_input: &mut RequestInput,
+        conversation_data: &mut api::ConversationData,
+        request_params: &mut api::RequestParams,
+        query_metadata: Option<RequestMetadata>,
+        ctx: &mut ModelContext<Self>,
+    ) -> anyhow::Result<()> {
+        if crate::ai::agent_providers::lookup_byop(ctx, &request_params.model).is_none() {
+            return Ok(());
+        }
+
+        let readiness_attempt_id = request_params
+            .byop_readiness_attempt_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        request_params.byop_readiness_attempt_id = Some(readiness_attempt_id.clone());
+        let conversation_id_for_log = conversation_data.id.to_string();
+        let mut diagnostics = ReadinessDiagnosticCoalescer::default();
+
+        for iteration in 0..BYOP_PREFLIGHT_MAX_ITERATIONS {
+            let removed_persisted = self.remove_persisted_byop_action_results_from_input(
+                conversation_data.id,
+                request_input,
+                ctx,
+            );
+            if removed_persisted > 0 {
+                log::debug!(
+                    "[byop-readiness] controller preflight removed {removed_persisted} \
+                     already-persisted action result(s) from current input \
+                     iteration={iteration}"
+                );
+                self.rebuild_request_after_byop_preflight(
+                    request_input,
+                    conversation_data,
+                    request_params,
+                    query_metadata.clone(),
+                    ctx,
+                )?;
+                request_params.byop_readiness_attempt_id = Some(readiness_attempt_id.clone());
+                continue;
+            }
+
+            let committed_current_results = self.commit_byop_current_action_results(
+                conversation_data.id,
+                request_input,
+                request_params,
+                ctx,
+            )?;
+            if committed_current_results > 0 {
+                log::debug!(
+                    "[byop-readiness] controller persisted current action result(s) \
+                     progress={committed_current_results} iteration={iteration}"
+                );
+                self.rebuild_request_after_byop_preflight(
+                    request_input,
+                    conversation_data,
+                    request_params,
+                    query_metadata.clone(),
+                    ctx,
+                )?;
+                request_params.byop_readiness_attempt_id = Some(readiness_attempt_id.clone());
+                continue;
+            }
+
+            let committed_finished_results = self.commit_byop_finished_action_results(
+                conversation_data.id,
+                request_params,
+                ctx,
+            )?;
+            if committed_finished_results > 0 {
+                log::debug!(
+                    "[byop-readiness] controller drained finished action result(s) \
+                     progress={committed_finished_results} iteration={iteration}"
+                );
+                self.rebuild_request_after_byop_preflight(
+                    request_input,
+                    conversation_data,
+                    request_params,
+                    query_metadata.clone(),
+                    ctx,
+                )?;
+                request_params.byop_readiness_attempt_id = Some(readiness_attempt_id.clone());
+                continue;
+            }
+
+            let live_tool_calls =
+                self.byop_unfinished_live_tool_calls(conversation_data.id, request_params, ctx);
+            let report =
+                crate::ai::agent_providers::chat_stream::classify_byop_controller_readiness_with_live_tool_calls(
+                    request_params,
+                    live_tool_calls,
+                );
+            match report.state {
+                crate::ai::byop_readiness::ReadinessState::Ready
+                | crate::ai::byop_readiness::ReadinessState::AcceptedHistoryRepair { .. } => {
+                    return Ok(());
+                }
+                crate::ai::byop_readiness::ReadinessState::NeedsCancellationCommit {
+                    tool_calls,
+                } => {
+                    let diagnostic_context = ReadinessDiagnosticContext::new(
+                        &conversation_id_for_log,
+                        &readiness_attempt_id,
+                        ReadinessTriggerLayer::ControllerPreflight,
+                    )
+                    .with_iteration(iteration);
+                    diagnostics.log_state(
+                        &crate::ai::byop_readiness::ReadinessState::NeedsCancellationCommit {
+                            tool_calls: tool_calls.clone(),
+                        },
+                        &diagnostic_context,
+                        ReadinessDiagnosticLevel::Debug,
+                    );
+                    let progress = self.commit_byop_cancellation_results(
+                        conversation_data.id,
+                        request_input,
+                        &tool_calls,
+                        ctx,
+                    )?;
+                    if progress == 0 {
+                        log::error!(
+                            "[byop-readiness] controller preflight made no cancellation progress \
+                             iteration={iteration} tool_calls={}",
+                            tool_calls.len()
+                        );
+                        diagnostics.finish(&diagnostic_context, ReadinessDiagnosticLevel::Error);
+                        return Err(BlockedByopReadinessError::new(
+                            ReadinessCategory::NeedsCancellationCommit,
+                        )
+                        .into());
+                    }
+                    log::debug!(
+                        "[byop-readiness] controller committed cancellation result(s) \
+                         progress={progress} iteration={iteration}"
+                    );
+                    self.rebuild_request_after_byop_preflight(
+                        request_input,
+                        conversation_data,
+                        request_params,
+                        query_metadata.clone(),
+                        ctx,
+                    )?;
+                    request_params.byop_readiness_attempt_id = Some(readiness_attempt_id.clone());
+                }
+                crate::ai::byop_readiness::ReadinessState::PendingToolResults { tool_calls } => {
+                    let diagnostic_context = ReadinessDiagnosticContext::new(
+                        &conversation_id_for_log,
+                        &readiness_attempt_id,
+                        ReadinessTriggerLayer::ControllerPreflight,
+                    )
+                    .with_iteration(iteration);
+                    diagnostics.log_state(
+                        &crate::ai::byop_readiness::ReadinessState::PendingToolResults {
+                            tool_calls: tool_calls.clone(),
+                        },
+                        &diagnostic_context,
+                        ReadinessDiagnosticLevel::Debug,
+                    );
+                    diagnostics.finish(&diagnostic_context, ReadinessDiagnosticLevel::Debug);
+                    return Err(PendingByopToolResultsError::new(tool_calls.len()).into());
+                }
+                crate::ai::byop_readiness::ReadinessState::MissingResultWithoutRepairSource {
+                    tool_calls,
+                    reason: crate::ai::byop_readiness::MissingResultReason::NoResult,
+                } => {
+                    // When the user interrupts the agent mid-tool, the interrupted call can lose
+                    // its cancelled result to a cancel race or a dropped long-running-command
+                    // future, leaving a tool_call with no tool_result. Blocking here would wedge
+                    // the conversation, and the only safe reading of a missing result is that the
+                    // call was cancelled, so synthesize one and let the conversation recover.
+                    let diagnostic_context = ReadinessDiagnosticContext::new(
+                        &conversation_id_for_log,
+                        &readiness_attempt_id,
+                        ReadinessTriggerLayer::ControllerPreflight,
+                    )
+                    .with_iteration(iteration);
+                    diagnostics.log_state(
+                        &crate::ai::byop_readiness::ReadinessState::MissingResultWithoutRepairSource {
+                            tool_calls: tool_calls.clone(),
+                            reason: crate::ai::byop_readiness::MissingResultReason::NoResult,
+                        },
+                        &diagnostic_context,
+                        ReadinessDiagnosticLevel::Debug,
+                    );
+                    let progress = self.synthesize_byop_missing_cancellation_results(
+                        conversation_data.id,
+                        &tool_calls,
+                        ctx,
+                    )?;
+                    if progress == 0 {
+                        diagnostics.finish(&diagnostic_context, ReadinessDiagnosticLevel::Error);
+                        log::error!(
+                            "[byop-readiness] controller preflight could not synthesize \
+                             cancellation result for missing tool call(s) \
+                             iteration={iteration} tool_calls={} conversation_id={} \
+                             request_attempt_id={}",
+                            tool_calls.len(),
+                            conversation_id_for_log,
+                            readiness_attempt_id
+                        );
+                        return Err(BlockedByopReadinessError::new(
+                            ReadinessCategory::MissingResultWithoutRepairSource,
+                        )
+                        .into());
+                    }
+                    log::info!(
+                        "[byop-readiness] controller synthesized cancellation result(s) for \
+                         interrupted tool call(s) progress={progress} iteration={iteration} \
+                         conversation_id={conversation_id_for_log}"
+                    );
+                    self.rebuild_request_after_byop_preflight(
+                        request_input,
+                        conversation_data,
+                        request_params,
+                        query_metadata.clone(),
+                        ctx,
+                    )?;
+                    request_params.byop_readiness_attempt_id = Some(readiness_attempt_id.clone());
+                }
+                state @ (crate::ai::byop_readiness::ReadinessState::DuplicateToolResults {
+                    ..
+                }
+                | crate::ai::byop_readiness::ReadinessState::OrphanToolResult { .. }
+                | crate::ai::byop_readiness::ReadinessState::OutOfOrderToolResult { .. }
+                | crate::ai::byop_readiness::ReadinessState::MissingResultWithoutRepairSource {
+                    ..
+                }) => {
+                    let category = state.category();
+                    let diagnostic_context = ReadinessDiagnosticContext::new(
+                        &conversation_id_for_log,
+                        &readiness_attempt_id,
+                        ReadinessTriggerLayer::ControllerPreflight,
+                    )
+                    .with_iteration(iteration);
+                    diagnostics.log_state(
+                        &state,
+                        &diagnostic_context,
+                        ReadinessDiagnosticLevel::Error,
+                    );
+                    diagnostics.finish(&diagnostic_context, ReadinessDiagnosticLevel::Error);
+                    log::error!(
+                        "[byop-readiness] controller blocked request category={category:?} \
+                         conversation_id={} trigger_layer=controller_preflight \
+                         request_attempt_id={} iteration={iteration}",
+                        conversation_id_for_log,
+                        readiness_attempt_id
+                    );
+                    return Err(BlockedByopReadinessError::new(category).into());
+                }
+            }
+        }
+
+        let diagnostic_context = ReadinessDiagnosticContext::new(
+            &conversation_id_for_log,
+            &readiness_attempt_id,
+            ReadinessTriggerLayer::ControllerPreflight,
+        );
+        diagnostics.log_category(
+            ReadinessCategory::ReadinessLoopDidNotConverge,
+            &diagnostic_context,
+            ReadinessDiagnosticLevel::Error,
+        );
+        diagnostics.finish(&diagnostic_context, ReadinessDiagnosticLevel::Error);
+        log::error!(
+            "[byop-readiness] controller preflight did not converge iterations={} \
+             conversation_id={} request_attempt_id={}",
+            BYOP_PREFLIGHT_MAX_ITERATIONS,
+            conversation_id_for_log,
+            readiness_attempt_id
+        );
+        Err(BlockedByopReadinessError::new(ReadinessCategory::ReadinessLoopDidNotConverge).into())
+    }
+
+    fn complete_byop_blocked_request(
+        &mut self,
+        request_input: RequestInput,
+        conversation_id: AIConversationId,
+        model_id: LLMId,
+        is_queued_prompt: bool,
+        error_message: String,
+        ctx: &mut ModelContext<Self>,
+    ) -> anyhow::Result<(AIConversationId, ResponseStreamId)> {
+        let response_stream_id = ResponseStreamId::new_local();
+        let input_contains_user_query = request_input
+            .all_inputs()
+            .any(|input| input.is_user_query());
+        let is_passive_request = request_input
+            .all_inputs()
+            .any(|input| input.is_passive_request());
+
+        for input in request_input.all_inputs() {
+            if let AIAgentInput::UserQuery {
+                referenced_attachments,
+                ..
+            } = input
+            {
+                self.maybe_populate_plans_for_ai_document_model(
+                    referenced_attachments,
+                    conversation_id,
+                    ctx,
+                );
+            }
+        }
+
+        BlocklistAIHistoryModel::handle(ctx).update(ctx, |history_model, ctx| {
+            history_model.update_conversation_for_new_request_input(
+                request_input,
+                response_stream_id.clone(),
+                self.terminal_surface_id,
+                ctx,
+            )?;
+            history_model.update_conversation_status(
+                self.terminal_surface_id,
+                conversation_id,
+                ConversationStatus::InProgress,
+                ctx,
+            );
+            Ok::<(), anyhow::Error>(())
+        })?;
+
+        BlocklistAIHistoryModel::handle(ctx).update(ctx, |history_model, ctx| {
+            history_model.mark_response_stream_completed_with_error(
+                RenderableAIError::Other {
+                    error_message,
+                    will_attempt_resume: false,
+                    waiting_for_network: false,
+                    is_user_error: false,
+                },
+                false,
+                &response_stream_id,
+                conversation_id,
+                self.terminal_surface_id,
+                ctx,
+            );
+        });
+
+        if input_contains_user_query {
+            let pending_document_id = self.context_model.as_ref(ctx).pending_document_id();
+            self.context_model.update(ctx, |context_model, ctx| {
+                context_model.reset_context_to_default(ctx);
+            });
+            if let Some(doc_id) = pending_document_id {
+                AIDocumentModel::handle(ctx).update(ctx, |model, mctx| {
+                    model.set_user_edit_status(&doc_id, AIDocumentUserEditStatus::UpToDate, mctx);
+                });
+            }
+        }
+
+        ctx.emit(BlocklistAIControllerEvent::SentRequest {
+            contains_user_query: input_contains_user_query,
+            is_queued_prompt,
+            model_id,
+            stream_id: response_stream_id.clone(),
+        });
+        if !is_passive_request {
+            BlocklistAIHistoryModel::handle(ctx).update(ctx, |history_model, ctx| {
+                history_model.mark_active_conversation_id(
+                    conversation_id,
+                    self.terminal_surface_id,
+                    ctx,
+                )
+            });
+        }
+        if input_contains_user_query {
+            ctx.dispatch_global_action("workspace:save_app", ());
+        }
+
+        Ok((conversation_id, response_stream_id))
+    }
+
+    fn flush_pending_byop_request_after_finished_action(
+        &mut self,
+        conversation_id: AIConversationId,
+        ctx: &mut ModelContext<Self>,
+    ) -> bool {
+        let Some(pending) = self.pending_byop_requests.remove(&conversation_id) else {
+            return false;
+        };
+        let PendingByopRequest {
+            mut request_input,
+            query_metadata,
+            recovery,
+            is_queued_prompt,
+        } = pending;
+
+        let finished_results = self.action_model.update(ctx, |action_model, _| {
+            action_model.drain_finished_action_results(conversation_id)
+        });
+        if !finished_results.is_empty() {
+            let context = input_context_for_request(
+                false,
+                self.context_model.as_ref(ctx),
+                self.active_session.as_ref(ctx),
+                Some(conversation_id),
+                vec![],
+                ctx,
+            );
+            for result in finished_results {
+                request_input
+                    .input_messages
+                    .entry(result.task_id.clone())
+                    .or_default()
+                    .push(AIAgentInput::ActionResult {
+                        result,
+                        context: context.clone(),
+                    });
+            }
+        }
+
+        log::debug!(
+            "[byop-readiness] flushing pending BYOP request after finished action \
+             conversation_id={conversation_id:?}"
+        );
+        if let Err(e) = self.send_request_input(
+            request_input,
+            query_metadata,
+            recovery,
+            is_queued_prompt,
+            ctx,
+        ) {
+            // Don't re-queue on a second failure: a still-pending request was already put back
+            // into pending_byop_requests by send_request_input, and other errors follow the
+            // controller's existing paths.
+            if e.downcast_ref::<PendingByopToolResultsError>().is_none() {
+                log::error!("[byop-readiness] failed to flush pending BYOP request: {e:?}");
+            }
+        }
+        true
+    }
+
+    /// Builds the request params for `request_input`, including the BYOP-only sidecars: the
+    /// conversation's compaction and repair state, and any long-running command the agent is
+    /// attached to.
+    fn build_request_params_for_input(
+        &self,
+        request_input: &RequestInput,
+        conversation_data: api::ConversationData,
+        query_metadata: Option<RequestMetadata>,
+        parent_agent_id: Option<String>,
+        agent_name: Option<String>,
+        ctx: &mut ModelContext<Self>,
+    ) -> api::RequestParams {
+        let history_model = BlocklistAIHistoryModel::handle(ctx);
+        let conversation_id = conversation_data.id;
+        let scope = self.team_context(ctx);
+        let mut request_params = api::RequestParams::new(
+            Some(self.terminal_surface_id),
+            SessionContext::from_session(self.active_session.as_ref(ctx), ctx),
+            request_input,
+            conversation_data,
+            query_metadata,
+            &scope,
+            ctx,
+        );
+        request_params.parent_agent_id = parent_agent_id;
+        request_params.agent_name = agent_name;
+
+        // These sidecars only feed the direct-inference path; a request bound for Warp's
+        // servers neither reads them nor should pay to compute them.
+        if crate::ai::agent_providers::lookup_byop(ctx, &request_params.model).is_some() {
+            let compaction_cfg = crate::ai::byop_compaction::CompactionConfig::from_settings(ctx);
+            history_model.update(ctx, |history_model, _ctx| {
+                if let Some(convo) = history_model.conversation_mut(&conversation_id) {
+                    crate::ai::byop_compaction::commit::prune_now(convo, &compaction_cfg);
+                }
+            });
+            if let Some(convo) = history_model.as_ref(ctx).conversation(&conversation_id) {
+                request_params.compaction_state = Some(convo.compaction_state.clone());
+                request_params.byop_repair_state = convo.byop_repair_state.clone();
+            }
+            self.populate_lrc_request_params(&mut request_params, conversation_id);
+        }
+        request_params
+    }
+
+    /// Re-reads the conversation after the preflight changed it, so the next readiness pass and
+    /// the eventual request both see the newly persisted messages.
+    fn rebuild_request_after_byop_preflight(
+        &self,
+        request_input: &RequestInput,
+        conversation_data: &mut api::ConversationData,
+        request_params: &mut api::RequestParams,
+        query_metadata: Option<RequestMetadata>,
+        ctx: &mut ModelContext<Self>,
+    ) -> anyhow::Result<()> {
+        let conversation_id = conversation_data.id;
+        let history_model = BlocklistAIHistoryModel::handle(ctx);
+        let (tasks, server_conversation_token, forked_from_conversation_token, parent_agent_id, agent_name) = {
+            let Some(conversation) = history_model.as_ref(ctx).conversation(&conversation_id) else {
+                return Err(anyhow!(
+                    "Conversation {conversation_id:?} disappeared during BYOP preflight"
+                ));
+            };
+            (
+                conversation.compute_active_tasks(),
+                conversation.server_conversation_token().cloned(),
+                conversation.forked_from_server_conversation_token().cloned(),
+                conversation.parent_agent_id().map(str::to_string),
+                conversation.agent_name().map(str::to_string),
+            )
+        };
+        *conversation_data = api::ConversationData {
+            id: conversation_id,
+            tasks,
+            server_conversation_token,
+            forked_from_conversation_token,
+            ambient_agent_task_id: self.ambient_agent_task_id,
+            existing_suggestions: history_model
+                .as_ref(ctx)
+                .existing_suggestions_for_conversation(conversation_id)
+                .cloned(),
+        };
+        *request_params = self.build_request_params_for_input(
+            request_input,
+            conversation_data.clone(),
+            query_metadata,
+            parent_agent_id,
+            agent_name,
+            ctx,
+        );
+        Ok(())
+    }
+
     /// Attempts to send a request to the AI model API. Adds context to the input if it
     /// contains a user query. Returns `Err` if the AI input was not able to be sent due to an
     /// existing in-flight request. Emits an event containing a receiver for the AI's output.
@@ -2601,9 +3555,75 @@ impl BlocklistAIController {
     /// input) for an existing conversation. Consider calling [`Self::send_custom_ai_input_query`] if
     /// you're trying to send a query with a custom [`AIAgentInput`] type where you'd like the "normal"
     /// flow that handles existing conversations properly.
+    fn has_persisted_tool_result(
+        &self,
+        conversation_id: AIConversationId,
+        task_id: &str,
+        tool_call_id: &str,
+        ctx: &mut ModelContext<Self>,
+    ) -> bool {
+        // The persisted `ToolCallResult` carries only `tool_call_id`, with no back-reference to
+        // the assistant message, so the tightest match available is (task_id, tool_call_id).
+        let task_id_owned = TaskId::new(task_id.to_owned());
+        BlocklistAIHistoryModel::as_ref(ctx)
+            .conversation(&conversation_id)
+            .and_then(|conversation| conversation.get_task(&task_id_owned))
+            .is_some_and(|task| {
+                task.messages().any(|msg| {
+                    msg.task_id == task_id
+                        && matches!(
+                            msg.message.as_ref(),
+                            Some(message::Message::ToolCallResult(result))
+                                if result.tool_call_id == tool_call_id
+                        )
+                })
+            })
+    }
+
+    fn byop_action_result_message(
+        request_id: &str,
+        result: &AIAgentActionResult,
+    ) -> warp_multi_agent_api::Message {
+        let structured_result =
+            crate::ai::agent_providers::tools::action_result_to_msg_result(result);
+        let server_message_data = if structured_result.is_none() {
+            let status = if result.result.is_cancelled() {
+                "cancelled"
+            } else {
+                "completed"
+            };
+            crate::ai::agent_providers::tools::serialize_action_result(result).unwrap_or_else(
+                || {
+                    serde_json::json!({
+                        "status": status,
+                        "result": result.result.to_string(),
+                    })
+                    .to_string()
+                },
+            )
+        } else {
+            String::new()
+        };
+
+        warp_multi_agent_api::Message {
+            id: uuid::Uuid::new_v4().to_string(),
+            task_id: result.task_id.to_string(),
+            server_message_data,
+            citations: vec![],
+            message: Some(message::Message::ToolCallResult(message::ToolCallResult {
+                tool_call_id: result.id.to_string(),
+                context: None,
+                result: structured_result,
+            })),
+            request_id: request_id.to_owned(),
+            timestamp: None,
+            ..Default::default()
+        }
+    }
+
     fn send_request_input(
         &mut self,
-        request_input: RequestInput,
+        mut request_input: RequestInput,
         query_metadata: Option<RequestMetadata>,
         recovery: RecoveryBudget,
         is_queued_prompt: bool,
@@ -2687,7 +3707,10 @@ impl BlocklistAIController {
             return Err(anyhow::anyhow!(AI_INPUT_NOT_SENT_ERROR_STR));
         }
 
-        let conversation_data = api::ConversationData {
+        // A new request supersedes any BYOP request deferred for this conversation.
+        self.pending_byop_requests.remove(&conversation_id);
+
+        let mut conversation_data = api::ConversationData {
             id: conversation_id,
             tasks: active_tasks,
             server_conversation_token: conversation_server_token,
@@ -2720,20 +3743,107 @@ impl BlocklistAIController {
             });
         }
 
-        let scope = self.team_context(ctx);
         // Pinned at send, so the request keeps the team the surface was on when the user sent it.
-        let team_scope = RequestTeamScope::from_scope(&scope);
-        let mut request_params = api::RequestParams::new(
-            Some(self.terminal_surface_id),
-            SessionContext::from_session(self.active_session.as_ref(ctx), ctx),
+        let team_scope = RequestTeamScope::from_scope(&self.team_context(ctx));
+        let mut request_params = self.build_request_params_for_input(
             &request_input,
             conversation_data.clone(),
-            query_metadata,
-            &scope,
+            query_metadata.clone(),
+            parent_agent_id,
+            agent_name,
             ctx,
         );
-        request_params.parent_agent_id = parent_agent_id;
-        request_params.agent_name = agent_name;
+
+        // BYOP requests are sent straight to the user's provider, so the client owns the
+        // invariants the server would otherwise enforce: every tool call needs a matching result
+        // before the next request goes out, and results the client produced have to be persisted
+        // into the conversation. The preflight settles both, or reports why it cannot.
+        if let Err(error) = self.run_byop_request_preflight(
+            &mut request_input,
+            &mut conversation_data,
+            &mut request_params,
+            query_metadata.clone(),
+            ctx,
+        ) {
+            if let Some(pending) = error.downcast_ref::<PendingByopToolResultsError>() {
+                log::debug!(
+                    "[byop-readiness] BYOP request not opened; waiting for pending tool \
+                     result(s) category={:?} tool_calls={} conversation_id={} \
+                     request_attempt_id={}",
+                    pending.category(),
+                    pending.tool_call_count(),
+                    conversation_data.id,
+                    request_params
+                        .byop_readiness_attempt_id
+                        .as_deref()
+                        .unwrap_or("unknown")
+                );
+                // Hold the user's input until the conversation's live actions finish; it is
+                // re-sent by `flush_pending_byop_request_after_finished_action`.
+                self.pending_byop_requests.insert(
+                    conversation_id,
+                    PendingByopRequest {
+                        request_input,
+                        query_metadata,
+                        recovery,
+                        is_queued_prompt,
+                    },
+                );
+                return Err(error);
+            }
+            if let Some(blocked) = error.downcast_ref::<BlockedByopReadinessError>() {
+                log::error!(
+                    "[byop-readiness] rendering blocked request error category={:?} \
+                     conversation_id={} request_attempt_id={}",
+                    blocked.category(),
+                    conversation_data.id,
+                    request_params
+                        .byop_readiness_attempt_id
+                        .as_deref()
+                        .unwrap_or("unknown")
+                );
+                return self.complete_byop_blocked_request(
+                    request_input,
+                    conversation_data.id,
+                    request_params.model.clone(),
+                    is_queued_prompt,
+                    BLOCKED_BYOP_REQUEST_MESSAGE.to_owned(),
+                    ctx,
+                );
+            }
+            // Surface persistence failures through the same blocked-request UI; otherwise they
+            // bubble up as a generic error and the user sees nothing.
+            if let Some(persistence_err) =
+                error.downcast_ref::<crate::ai::agent::conversation::UpdateConversationError>()
+                && matches!(
+                    persistence_err,
+                    crate::ai::agent::conversation::UpdateConversationError::ByopPreflightPersistenceUnavailable(_)
+                        | crate::ai::agent::conversation::UpdateConversationError::ByopPreflightPersistenceSend(_)
+                )
+            {
+                log::error!(
+                    "[byop-readiness] rendering blocked request due to persistence failure: \
+                     {persistence_err:?} conversation_id={} request_attempt_id={}",
+                    conversation_data.id,
+                    request_params
+                        .byop_readiness_attempt_id
+                        .as_deref()
+                        .unwrap_or("unknown")
+                );
+                return self.complete_byop_blocked_request(
+                    request_input,
+                    conversation_data.id,
+                    request_params.model.clone(),
+                    is_queued_prompt,
+                    "Warp couldn't save the conversation state needed to send this request. \
+                     Check that session restoration is enabled and that there is enough disk \
+                     space, then try again."
+                        .to_owned(),
+                    ctx,
+                );
+            }
+            return Err(error);
+        }
 
         let server_conversation_token_for_identifiers =
             conversation_data.server_conversation_token.clone();
@@ -3884,3 +4994,34 @@ fn get_running_command(terminal_model: &TerminalModel) -> Option<RunningCommand>
 #[cfg(test)]
 #[path = "controller_tests.rs"]
 mod tests;
+
+fn byop_get_running_command_for_lrc(terminal_model: &TerminalModel) -> Option<RunningCommand> {
+    let active_block = terminal_model.block_list().active_block();
+    if !active_block.is_active_and_long_running() {
+        return None;
+    }
+    if !active_block.is_agent_in_control_or_tagged_in() {
+        return None;
+    }
+    let is_alt_screen_active = terminal_model.is_alt_screen_active();
+    Some(RunningCommand {
+        block_id: active_block.id().clone(),
+        command: active_block.command_to_string(),
+        grid_contents: if is_alt_screen_active {
+            formatted_terminal_contents_for_input(
+                terminal_model.alt_screen().grid_handler(),
+                None,
+                CURSOR_MARKER,
+            )
+        } else {
+            formatted_terminal_contents_for_input(
+                active_block.output_grid().grid_handler(),
+                Some(1000),
+                CURSOR_MARKER,
+            )
+        },
+        cursor: CURSOR_MARKER.to_owned(),
+        requested_command_id: active_block.requested_command_action_id().cloned(),
+        is_alt_screen_active,
+    })
+}

@@ -2188,6 +2188,45 @@ impl AIConversation {
         Ok(())
     }
 
+    pub fn append_byop_preflight_messages_to_task(
+        &mut self,
+        task_id: TaskId,
+        messages: Vec<api::Message>,
+        ctx: &mut ModelContext<BlocklistAIHistoryModel>,
+    ) -> Result<usize, UpdateConversationError> {
+        let message_count = messages.len();
+        if message_count == 0 {
+            return Ok(0);
+        }
+        self.ensure_can_persist_byop_preflight_state(ctx)?;
+
+        let message_ids = messages
+            .iter()
+            .map(|message| message.id.clone())
+            .collect::<HashSet<_>>();
+        self.task_store
+            .modify_task(&task_id, |task| task.append_source_messages(messages))
+            .ok_or(UpdateConversationError::TaskNotFound)??;
+        if let Err(e) = self.send_updated_conversation_state_for_byop_preflight(ctx) {
+            if let Some(rollback_result) = self.task_store.modify_task(&task_id, |task| {
+                task.remove_source_messages_by_ids(&message_ids)
+            }) {
+                if let Err(rollback_error) = rollback_result {
+                    log::error!(
+                        "[byop-readiness] failed to roll back preflight messages after \
+                         persistence error: {rollback_error:?}"
+                    );
+                }
+            } else {
+                log::error!(
+                    "[byop-readiness] failed to find task while rolling back preflight messages"
+                );
+            }
+            return Err(e);
+        }
+        Ok(message_count)
+    }
+
     pub fn append_reassigned_exchange(
         &mut self,
         response_stream_id: &ResponseStreamId,
@@ -3920,6 +3959,130 @@ impl AIConversation {
         }
     }
 
+    fn ensure_can_persist_byop_preflight_state(
+        &self,
+        ctx: &mut ModelContext<BlocklistAIHistoryModel>,
+    ) -> Result<(), UpdateConversationError> {
+        if self.is_viewing_shared_session {
+            return Err(
+                UpdateConversationError::ByopPreflightPersistenceUnavailable(
+                    "shared session conversations are not persisted".to_owned(),
+                ),
+            );
+        }
+        if !*GeneralSettings::as_ref(ctx).restore_session {
+            return Err(
+                UpdateConversationError::ByopPreflightPersistenceUnavailable(
+                    "session restoration is disabled".to_owned(),
+                ),
+            );
+        }
+        if !AppExecutionMode::as_ref(ctx).can_save_session() {
+            return Err(
+                UpdateConversationError::ByopPreflightPersistenceUnavailable(
+                    "current execution mode cannot save sessions".to_owned(),
+                ),
+            );
+        }
+        if GlobalResourceHandlesProvider::as_ref(ctx)
+            .get()
+            .model_event_sender
+            .is_none()
+        {
+            return Err(
+                UpdateConversationError::ByopPreflightPersistenceUnavailable(
+                    "sqlite sender is unavailable".to_owned(),
+                ),
+            );
+        }
+        Ok(())
+    }
+
+    fn send_updated_conversation_state_for_byop_preflight(
+        &self,
+        ctx: &mut ModelContext<BlocklistAIHistoryModel>,
+    ) -> Result<(), UpdateConversationError> {
+        // The caller already ran `ensure_can_persist_byop_preflight_state`, so this only has
+        // to report `try_send`'s own full/closed failures.
+        let sqlite_sender = GlobalResourceHandlesProvider::as_ref(ctx)
+            .get()
+            .model_event_sender
+            .clone()
+            .ok_or_else(|| {
+                UpdateConversationError::ByopPreflightPersistenceUnavailable(
+                    "sqlite sender is unavailable".to_owned(),
+                )
+            })?;
+        sqlite_sender
+            .try_send(self.updated_conversation_state_event())
+            .map_err(|e| UpdateConversationError::ByopPreflightPersistenceSend(format!("{e:?}")))
+    }
+
+    /// Builds the sqlite writer event describing this conversation's current persisted state.
+    fn updated_conversation_state_event(&self) -> ModelEvent {
+        let reverted_action_ids = if self.reverted_action_ids.is_empty() {
+            None
+        } else {
+            Some(
+                self.reverted_action_ids
+                    .clone()
+                    .into_iter()
+                    .map_into()
+                    .collect(),
+            )
+        };
+
+        let artifacts_json = if self.artifacts.is_empty() {
+            None
+        } else {
+            match serde_json::to_string(&self.artifacts)
+                .context("Failed to serialize artifacts when persisting conversation data")
+            {
+                Ok(json) => Some(json),
+                Err(e) => {
+                    report_error!(e);
+                    None
+                }
+            }
+        };
+
+        let updated_tasks: Vec<_> = self
+            .all_tasks()
+            .filter_map(|task| task.source_for_persistence())
+            .collect();
+        ModelEvent::UpdateMultiAgentConversation {
+            conversation_id: self.id.to_string(),
+            updated_tasks,
+            conversation_data: AgentConversationData {
+                server_conversation_token: self
+                    .server_conversation_token
+                    .clone()
+                    .map(|token| token.into()),
+                conversation_usage_metadata: Some(self.conversation_usage_metadata.clone()),
+                reverted_action_ids,
+                forked_from_server_conversation_token: self
+                    .forked_from_server_conversation_token
+                    .clone()
+                    .map(|token| token.into()),
+                artifacts_json,
+                parent_agent_id: self.parent_agent_id.clone(),
+                agent_name: self.agent_name.clone(),
+                orchestration_harness_type: self.orchestration_harness_type.clone(),
+                parent_conversation_id: self.parent_conversation_id.map(|id| id.to_string()),
+                is_remote_child: self.is_remote_child,
+                // Legacy field; retained for backward-compatible
+                // deserialization but no longer written. The optimistic-root
+                // case is now handled by `Task::source_for_persistence`
+                // (returns `None`) and `new_restored_synthesizing_on_empty`.
+                root_task_is_optimistic: None,
+                run_id: self.task_id.map(|id| id.to_string()),
+                autoexecute_override: Some(self.autoexecute_override.into()),
+                last_event_sequence: self.last_event_sequence,
+                pinned: self.pinned,
+            },
+        }
+    }
+
     pub(crate) fn write_updated_conversation_state(
         &mut self,
         ctx: &mut ModelContext<BlocklistAIHistoryModel>,
@@ -3952,67 +4115,7 @@ impl AIConversation {
             return;
         };
 
-        let reverted_action_ids = if self.reverted_action_ids.is_empty() {
-            None
-        } else {
-            Some(
-                self.reverted_action_ids
-                    .clone()
-                    .into_iter()
-                    .map_into()
-                    .collect(),
-            )
-        };
-
-        let artifacts_json = if self.artifacts.is_empty() {
-            None
-        } else {
-            match serde_json::to_string(&self.artifacts)
-                .context("Failed to serialize artifacts when persisting conversation data")
-            {
-                Ok(json) => Some(json),
-                Err(e) => {
-                    report_error!(e);
-                    None
-                }
-            }
-        };
-
-        let updated_tasks: Vec<_> = self
-            .all_tasks()
-            .filter_map(|task| task.source_for_persistence())
-            .collect();
-        let event = ModelEvent::UpdateMultiAgentConversation {
-            conversation_id: self.id.to_string(),
-            updated_tasks,
-            conversation_data: AgentConversationData {
-                server_conversation_token: self
-                    .server_conversation_token
-                    .clone()
-                    .map(|token| token.into()),
-                conversation_usage_metadata: Some(self.conversation_usage_metadata.clone()),
-                reverted_action_ids,
-                forked_from_server_conversation_token: self
-                    .forked_from_server_conversation_token
-                    .clone()
-                    .map(|token| token.into()),
-                artifacts_json,
-                parent_agent_id: self.parent_agent_id.clone(),
-                agent_name: self.agent_name.clone(),
-                orchestration_harness_type: self.orchestration_harness_type.clone(),
-                parent_conversation_id: self.parent_conversation_id.map(|id| id.to_string()),
-                is_remote_child: self.is_remote_child,
-                // Legacy field; retained for backward-compatible
-                // deserialization but no longer written. The optimistic-root
-                // case is now handled by `Task::source_for_persistence`
-                // (returns `None`) and `new_restored_synthesizing_on_empty`.
-                root_task_is_optimistic: None,
-                run_id: self.task_id.map(|id| id.to_string()),
-                autoexecute_override: Some(self.autoexecute_override.into()),
-                last_event_sequence: self.last_event_sequence,
-                pinned: self.pinned,
-            },
-        };
+        let event = self.updated_conversation_state_event();
         ctx.spawn(
             async move {
                 if let Err(e) = sqlite_sender.send(event) {
@@ -4854,6 +4957,10 @@ pub enum UpdateConversationError {
     NoActiveTask,
     #[error("No pending request.")]
     NoPendingRequest,
+    #[error("Cannot persist BYOP preflight state: {0}")]
+    ByopPreflightPersistenceUnavailable(String),
+    #[error("Failed to send BYOP preflight state to the sqlite writer: {0}")]
+    ByopPreflightPersistenceSend(String),
 }
 
 pub use ai_types::AIConversationId;
