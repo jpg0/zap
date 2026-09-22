@@ -14426,6 +14426,32 @@ impl Input {
         };
         let context = execution_context_for_session(&session);
 
+        // When the active model is one of the user's own providers, predict there instead of
+        // asking Warp's server.
+        if let Some(rendered) = crate::ai::agent_providers::active_ai::nld_predict::dispatch(
+            ctx,
+            Some(self.terminal_view_id),
+            crate::ai::agent_providers::active_ai::nld_predict::Input {
+                partial_query: am_query_input_buffer.clone(),
+                last_block: Some(crate::ai::agent_providers::active_ai::LastBlockSnippet {
+                    command: processed_input.clone(),
+                    exit_code: exit_code.value(),
+                    pwd: working_dir.cloned().unwrap_or_default(),
+                }),
+                system_context: context.to_json_string(),
+            },
+        ) {
+            self.predict_am_queries_future_handle = Some(ctx.spawn(
+                async move {
+                    crate::ai::agent_providers::active_ai::nld_predict::run(rendered).await
+                },
+                move |me: &mut Self, maybe_suggestion: Option<String>, ctx: &mut ViewContext<Self>| {
+                    me.apply_predicted_am_query(am_query_input_buffer, maybe_suggestion, ctx);
+                },
+            ));
+            return;
+        }
+
         let request = PredictAMQueriesRequest {
             context_messages: vec![json_message.to_string()],
             partial_query: am_query_input_buffer.clone(),
@@ -14448,24 +14474,32 @@ impl Input {
                 }
             },
             move |me: &mut Self, maybe_suggestion: Option<String>, ctx: &mut ViewContext<Self>| {
-                // Only set the autosuggestion if the input buffer hasn't changed, since we made the original request
-                // i.e. verify the suggestion is still relevant.
-                if am_query_input_buffer != me.editor.as_ref(ctx).buffer_text(ctx) {
-                    return;
-                }
-
-                if let Some(suggestion) = maybe_suggestion {
-                    me.set_autosuggestion(
-                        suggestion,
-                        AutosuggestionType::AgentModeQuery {
-                            context_block_ids: vec![],
-                            was_intelligent_autosuggestion: true,
-                        },
-                        ctx,
-                    );
-                }
+                me.apply_predicted_am_query(am_query_input_buffer, maybe_suggestion, ctx);
             },
         ));
+    }
+
+    /// Applies a predicted agent-mode query as an autosuggestion, ignoring it if the user has
+    /// typed since the request went out, which would make it stale.
+    fn apply_predicted_am_query(
+        &mut self,
+        requested_for_buffer: String,
+        maybe_suggestion: Option<String>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if requested_for_buffer != self.editor.as_ref(ctx).buffer_text(ctx) {
+            return;
+        }
+        if let Some(suggestion) = maybe_suggestion {
+            self.set_autosuggestion(
+                suggestion,
+                AutosuggestionType::AgentModeQuery {
+                    context_block_ids: vec![],
+                    was_intelligent_autosuggestion: true,
+                },
+                ctx,
+            );
+        }
     }
 
     /// Re-submits a queued prompt through the correct handler (slash, skill, or regular AI query),
