@@ -1227,6 +1227,11 @@ pub struct AgentConversationData {
     /// pill bar. Orchestrator conversations always serialize as `false`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub pinned: bool,
+    /// Serialized compaction sidecar for conversations run against the user's own provider.
+    /// Without it a restored conversation re-sends the history a summary replaced, which can
+    /// exceed the model's context window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_state_json: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

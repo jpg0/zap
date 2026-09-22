@@ -649,6 +649,7 @@ impl AIConversation {
             autoexecute_override,
             last_event_sequence,
             pinned,
+            compaction_state,
         ) = if let Some(data) = conversation_data {
             let server_conversation_token = data
                 .server_conversation_token
@@ -674,6 +675,19 @@ impl AIConversation {
                         .map_err(|e| {
                             report_error!(
                                 anyhow::Error::new(e).context("Failed to deserialize artifacts")
+                            )
+                        })
+                        .ok()
+                })
+                .unwrap_or_default();
+            let compaction_state: crate::ai::byop_compaction::state::CompactionState = data
+                .compaction_state_json
+                .and_then(|json| {
+                    serde_json::from_str(&json)
+                        .map_err(|e| {
+                            report_error!(
+                                anyhow::Error::new(e)
+                                    .context("Failed to deserialize compaction state")
                             )
                         })
                         .ok()
@@ -705,6 +719,7 @@ impl AIConversation {
                 autoexecute_override,
                 data.last_event_sequence,
                 data.pinned,
+                compaction_state,
             )
         } else {
             (
@@ -723,6 +738,7 @@ impl AIConversation {
                 AIConversationAutoexecuteMode::default(),
                 None,
                 false,
+                crate::ai::byop_compaction::state::CompactionState::default(),
             )
         };
         let total_provider_cost_in_cents = conversation_usage_metadata.total_provider_cost_in_cents;
@@ -766,7 +782,7 @@ impl AIConversation {
             orchestration_configs: HashMap::new(),
             pinned,
             task_sync_mode: TaskSyncMode::default(),
-            compaction_state: Default::default(),
+            compaction_state,
             byop_repair_state: Default::default(),
         })
     }
@@ -4079,6 +4095,18 @@ impl AIConversation {
                 autoexecute_override: Some(self.autoexecute_override.into()),
                 last_event_sequence: self.last_event_sequence,
                 pinned: self.pinned,
+                compaction_state_json: if self.compaction_state.completed().is_empty() {
+                    None
+                } else {
+                    serde_json::to_string(&self.compaction_state)
+                        .map_err(|e| {
+                            report_error!(
+                                anyhow::Error::new(e)
+                                    .context("Failed to serialize compaction state")
+                            )
+                        })
+                        .ok()
+                },
             },
         }
     }

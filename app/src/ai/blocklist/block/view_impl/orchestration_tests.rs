@@ -148,6 +148,7 @@ fn participant_for_restored_child_run_id_resolves_to_agent_name() {
                     autoexecute_override: None,
                     last_event_sequence: None,
                     pinned: false,
+                    compaction_state_json: None,
                 })
                 .expect("child conversation data should serialize"),
                 last_modified_at: now,
@@ -205,6 +206,7 @@ fn participant_for_restored_child_run_id_resolves_to_agent_name() {
                     autoexecute_override: None,
                     last_event_sequence: None,
                     pinned: false,
+                    compaction_state_json: None,
                 })
                 .expect("parent conversation data should serialize"),
                 last_modified_at: now - chrono::Duration::seconds(1),

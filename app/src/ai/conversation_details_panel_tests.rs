@@ -78,6 +78,7 @@ fn test_from_conversation_prefers_server_creator_profile() {
                 autoexecute_override: None,
                 last_event_sequence: None,
                 pinned: false,
+                compaction_state_json: None,
             },
         );
         conversation.set_server_metadata(create_test_server_metadata(
@@ -247,6 +248,7 @@ fn test_from_task_includes_linked_directory_when_run_id_matches() {
                 autoexecute_override: None,
                 last_event_sequence: None,
                 pinned: false,
+                compaction_state_json: None,
             },
         );
 
@@ -393,6 +395,7 @@ fn test_from_conversation_populates_local_conversation_fields() {
                 is_remote_child: false,
                 root_task_is_optimistic: None,
                 pinned: false,
+                compaction_state_json: None,
             },
         );
 
@@ -507,6 +510,7 @@ fn test_from_task_includes_linked_directory_when_server_token_matches() {
                 autoexecute_override: None,
                 last_event_sequence: None,
                 pinned: false,
+                compaction_state_json: None,
             },
         );
 
@@ -605,6 +609,7 @@ fn test_conversation_mode_carries_no_runner() {
                 autoexecute_override: None,
                 last_event_sequence: None,
                 pinned: false,
+                compaction_state_json: None,
             },
         );
 

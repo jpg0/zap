@@ -60,6 +60,7 @@ fn conversation_data_with_provider_cost(
         autoexecute_override: None,
         last_event_sequence: None,
         pinned: false,
+        compaction_state_json: None,
     }
 }
 
@@ -1542,4 +1543,54 @@ fn fetched_memories_dedupes_keeping_first_position_and_latest_data() {
             fetched_memory("m1", "same memory id different store", "store-2", None),
         ]
     );
+}
+
+/// A conversation compacted against the user's own provider must keep that state across a
+/// restart. Without it the summarized history is sent in full again, which can exceed the
+/// model's context window and leave the conversation unable to continue.
+#[test]
+fn restore_keeps_compaction_state() {
+    use crate::ai::byop_compaction::state::{CompactionState, CompletedCompaction};
+
+    let mut compaction_state = CompactionState::default();
+    compaction_state.push_completed(CompletedCompaction {
+        user_msg_id: "user-1".to_string(),
+        assistant_msg_id: "assistant-1".to_string(),
+        head_message_ids: vec!["old-1".to_string(), "old-2".to_string()],
+        tail_start_id: Some("tail-1".to_string()),
+        summary_text: Some("summary of the earlier turns".to_string()),
+        auto: true,
+        overflow: true,
+    });
+
+    let conversation_data = AgentConversationData {
+        compaction_state_json: Some(
+            serde_json::to_string(&compaction_state).expect("compaction state serializes"),
+        ),
+        ..Default::default()
+    };
+
+    let restored = restored_conversation(Some(conversation_data));
+
+    let hidden = restored.compaction_state.hidden_message_ids();
+    assert!(hidden.contains("old-1"), "summarized history should stay hidden after restore");
+    assert!(hidden.contains("old-2"));
+    assert_eq!(
+        restored.compaction_state.completed().len(),
+        1,
+        "the completed compaction should survive the round trip"
+    );
+    assert_eq!(
+        restored.compaction_state.completed()[0].summary_text.as_deref(),
+        Some("summary of the earlier turns")
+    );
+}
+
+/// Conversations that were never compacted must not write the sidecar, so rows for the
+/// overwhelming majority of conversations are unchanged.
+#[test]
+fn restore_without_compaction_state_is_empty() {
+    let restored = restored_conversation(Some(AgentConversationData::default()));
+    assert!(restored.compaction_state.completed().is_empty());
+    assert!(restored.compaction_state.hidden_message_ids().is_empty());
 }

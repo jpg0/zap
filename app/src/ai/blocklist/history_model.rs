@@ -1826,6 +1826,7 @@ impl BlocklistAIHistoryModel {
             autoexecute_override: Some(source_conversation.autoexecute_override().into()),
             last_event_sequence: None,
             pinned: false,
+            compaction_state_json: None,
         };
         let forked_conversation_id = AIConversationId::new();
         if let Err(e) = sqlite_sender.send(ModelEvent::UpdateMultiAgentConversation {
@@ -2004,6 +2005,7 @@ impl BlocklistAIHistoryModel {
             autoexecute_override: Some(conversation.autoexecute_override().into()),
             last_event_sequence: None,
             pinned: false,
+            compaction_state_json: None,
         };
 
         let forked_conversation_id = AIConversationId::new();
@@ -3089,6 +3091,7 @@ fn merged_remote_child_placeholder_conversation_data(
         reverted_action_ids: None,
         root_task_is_optimistic: None,
         autoexecute_override: None,
+        compaction_state_json: None,
     }
 }
 

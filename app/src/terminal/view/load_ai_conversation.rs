@@ -944,6 +944,7 @@ impl TerminalView {
             autoexecute_override: None,
             last_event_sequence: None,
             pinned: false,
+            compaction_state_json: None,
         };
 
         // We already early-return for empty `tasks` above, so the strict

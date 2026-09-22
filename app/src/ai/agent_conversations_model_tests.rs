@@ -246,6 +246,7 @@ fn test_title_update_refreshes_shadowing_task_title() {
                 autoexecute_override: None,
                 last_event_sequence: None,
                 pinned: false,
+                compaction_state_json: None,
             },
         );
 
@@ -353,6 +354,7 @@ fn test_display_status_uses_matching_conversation_for_in_progress_task() {
                 autoexecute_override: None,
                 last_event_sequence: None,
                 pinned: false,
+                compaction_state_json: None,
             },
         );
 
@@ -410,6 +412,7 @@ fn test_display_status_uses_active_execution_over_previous_conversation_status()
                 autoexecute_override: None,
                 last_event_sequence: None,
                 pinned: false,
+                compaction_state_json: None,
             },
         );
 
@@ -474,6 +477,7 @@ fn test_display_status_updates_when_blocked_conversation_resumes() {
                 autoexecute_override: None,
                 last_event_sequence: None,
                 pinned: false,
+                compaction_state_json: None,
             },
         );
 
@@ -554,6 +558,7 @@ fn test_display_status_terminal_task_state_overrides_matching_conversation() {
                 autoexecute_override: None,
                 last_event_sequence: None,
                 pinned: false,
+                compaction_state_json: None,
             },
         );
 
@@ -609,6 +614,7 @@ fn test_status_filter_uses_display_status_for_task_backed_conversations() {
                 autoexecute_override: None,
                 last_event_sequence: None,
                 pinned: false,
+                compaction_state_json: None,
             },
         );
 
@@ -1206,6 +1212,7 @@ fn test_get_entries_excludes_conversation_shadowed_by_child_task() {
                 autoexecute_override: None,
                 last_event_sequence: None,
                 pinned: false,
+                compaction_state_json: None,
             },
         );
         history_model.update(&mut app, |model, ctx| {
@@ -1358,6 +1365,7 @@ fn test_get_entries_merges_task_and_local_conversation_by_run_id() {
                 autoexecute_override: None,
                 last_event_sequence: None,
                 pinned: false,
+                compaction_state_json: None,
             },
         );
 
@@ -1413,6 +1421,7 @@ fn test_get_entries_merges_task_and_local_conversation_by_server_token() {
                 autoexecute_override: None,
                 last_event_sequence: None,
                 pinned: false,
+                compaction_state_json: None,
             },
         );
 
@@ -1708,6 +1717,7 @@ fn test_resolve_open_action_returns_none_for_active_unattachable_session() {
                 autoexecute_override: None,
                 last_event_sequence: None,
                 pinned: false,
+                compaction_state_json: None,
             },
         );
 
@@ -2066,6 +2076,7 @@ fn test_server_token_assignment_updates_copy_link_resolution() {
                 autoexecute_override: None,
                 last_event_sequence: None,
                 pinned: false,
+                compaction_state_json: None,
             },
         );
 
@@ -2228,6 +2239,7 @@ fn test_resolve_copy_link_uses_attached_synced_conversation_for_task_without_tok
                 autoexecute_override: None,
                 last_event_sequence: None,
                 pinned: false,
+                compaction_state_json: None,
             },
         );
 
@@ -2608,6 +2620,7 @@ fn test_get_entries_prefers_task_when_task_id_matches_conversation_run_id() {
                 autoexecute_override: None,
                 last_event_sequence: None,
                 pinned: false,
+                compaction_state_json: None,
             },
         );
 
@@ -2669,6 +2682,7 @@ fn test_get_entries_prefers_task_when_server_token_matches() {
                 autoexecute_override: None,
                 last_event_sequence: None,
                 pinned: false,
+                compaction_state_json: None,
             },
         );
 
