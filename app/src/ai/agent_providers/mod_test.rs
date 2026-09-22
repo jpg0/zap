@@ -19,7 +19,7 @@ use crate::workspaces::team_tester::TeamTesterStatus;
 use crate::LaunchMode;
 use crate::settings::{AISettings, AgentProvider, AgentProviderApiType, AgentProviderModel};
 use crate::test_util::settings::initialize_settings_for_tests;
-use crate::workspaces::user_workspaces::UserWorkspaces;
+use crate::workspaces::user_workspaces::{TeamlessScopeForTest, UserWorkspaces};
 
 fn sample_provider(id: &str) -> AgentProvider {
     AgentProvider {
@@ -147,6 +147,91 @@ fn smoke_lookup_byop_returns_none_for_unknown_id() {
         app.read(|ctx| {
             assert!(lookup_byop(ctx, &LLMId::from("byop:missing:model")).is_none());
             assert!(lookup_byop(ctx, &LLMId::from("not-byop")).is_none());
+        });
+    });
+}
+
+/// Requests to the user's own providers never reach Warp, so configuring one enables the agent
+/// even for a logged-out user, who would otherwise have AI disabled entirely.
+#[test]
+fn own_providers_enable_ai_while_logged_out() {
+    App::test((), |mut app| async move {
+        initialize_settings_for_tests(&mut app);
+        app.add_singleton_model(AgentProviderSecrets::new);
+        app.add_singleton_model(|_| ServerApiProvider::new_for_test());
+        app.add_singleton_model(|_| AuthStateProvider::new_logged_out_for_test());
+        app.add_singleton_model(AuthManager::new_for_test);
+        app.add_singleton_model(|_| NetworkStatus::new());
+        app.add_singleton_model(UserWorkspaces::default_mock);
+        app.add_singleton_model(CloudModel::mock);
+        app.add_singleton_model(TeamTesterStatus::mock);
+        app.add_singleton_model(SyncQueue::mock);
+        app.add_singleton_model(UpdateManager::mock);
+        app.add_singleton_model(|_| TemplatableMCPServerManager::default());
+        app.add_singleton_model(|ctx| {
+            AIExecutionProfilesModel::new(&LaunchMode::new_for_unit_test(), ctx)
+        });
+        app.add_singleton_model(LLMPreferences::new);
+
+        app.read(|ctx| {
+            assert!(
+                AuthStateProvider::as_ref(ctx)
+                    .get()
+                    .is_anonymous_or_logged_out(),
+                "test app should start logged out"
+            );
+            assert!(
+                !AISettings::as_ref(ctx).is_any_ai_enabled(ctx),
+                "a logged-out user with no providers has no way to run a model"
+            );
+        });
+
+        app.update(|ctx| {
+            AISettings::handle(ctx).update(ctx, |settings, ctx| {
+                let _ = settings
+                    .agent_providers
+                    .set_value(vec![sample_provider("provider-logged-out")], ctx);
+            });
+        });
+
+        app.read(|ctx| {
+            assert!(
+                AISettings::as_ref(ctx).is_any_ai_enabled(ctx),
+                "a configured provider should enable AI without an account"
+            );
+        });
+    });
+}
+
+/// BYOP models are called with the user's own credentials, so no workspace BYO policy gates
+/// them the way it gates Warp's custom endpoints.
+#[test]
+fn byop_models_are_not_gated_by_workspace_policy() {
+    App::test((), |mut app| async move {
+        init_byop_test_app(&mut app);
+
+        let provider_id = "provider-policy";
+        app.update(|ctx| {
+            AISettings::handle(ctx).update(ctx, |settings, ctx| {
+                let _ = settings
+                    .agent_providers
+                    .set_value(vec![sample_provider(provider_id)], ctx);
+            });
+        });
+
+        app.read(|ctx| {
+            let preferences = LLMPreferences::as_ref(ctx);
+            let encoded = llm_id::encode(provider_id, "llama3.2");
+            let info = preferences
+                .byop_llm_info_for_id(&encoded)
+                .expect("configured BYOP model should resolve");
+            let scope = TeamlessScopeForTest;
+            assert!(crate::ai::llms::is_model_allowed_for_scope(
+                preferences,
+                info,
+                &scope,
+                ctx
+            ));
         });
     });
 }

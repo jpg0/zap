@@ -2801,13 +2801,16 @@ impl AISettings {
     }
 
     pub fn is_any_ai_enabled(&self, app: &AppContext) -> bool {
-        // Disable AI for anonymous and logged-out users.
+        // Disable AI for anonymous and logged-out users, unless they have configured their own
+        // providers: those requests are sent directly from this client with the user's own
+        // credentials and never reach Warp, so they don't need an account.
         let is_anonymous_or_logged_out = AuthStateProvider::as_ref(app)
             .get()
             .is_anonymous_or_logged_out();
+        let has_own_providers = !self.agent_providers.value().is_empty();
 
         *self.is_any_ai_enabled
-            && !is_anonymous_or_logged_out
+            && (has_own_providers || !is_anonymous_or_logged_out)
             && !self.is_ai_disabled_due_to_remote_session_org_policy(app)
     }
 

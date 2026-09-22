@@ -117,7 +117,10 @@ pub fn is_model_allowed_for_scope(
     scope: &dyn TeamScope,
     app: &AppContext,
 ) -> bool {
-    prefs.custom_llm_info_for_id(&llm.id).is_none()
+    // BYOP models are called directly by this client with the user's own credentials, so no
+    // workspace policy applies to them.
+    prefs.byop_llm_info_for_id(&llm.id).is_some()
+        || prefs.custom_llm_info_for_id(&llm.id).is_none()
         || UserWorkspaces::as_ref(app).are_member_byo_endpoints_allowed(scope)
 }
 
@@ -1231,6 +1234,11 @@ impl LLMPreferences {
             })
             .or_else(|| self.custom_llm_info_for_id(id))
             .or_else(|| self.custom_router_llm_info_for_id(id))
+    }
+
+    /// Resolves an `LLMId` against the user's BYOP provider models.
+    pub fn byop_llm_info_for_id(&self, id: &LLMId) -> Option<&LLMInfo> {
+        self.byop_llms.iter().find(|info| info.id == *id)
     }
 
     /// Resolves an `LLMId` against the user's custom-endpoint LLMs.
