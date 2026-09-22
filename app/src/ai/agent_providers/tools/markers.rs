@@ -44,8 +44,9 @@ fn open_code_review_result_to_json(
 
 pub static OPEN_CODE_REVIEW: OpenAiTool = OpenAiTool {
     name: "open_code_review",
-    description: "打开当前项目的 Code Review 面板(client UI 信号,无参数)。\
-                  当用户明确要求开 code review,或上下文显示要开始审查阶段时使用。",
+    description: "Opens the Code Review panel for the current project (a client UI signal; \
+                  takes no arguments). Use it when the user asks for a code review, or when \
+                  the conversation has reached a review stage.",
     parameters: empty_parameters,
     from_args: open_code_review_from_args,
     result_to_json: open_code_review_result_to_json,
@@ -120,10 +121,11 @@ fn transfer_result_to_json(result: &api::message::tool_call_result::Result) -> O
 
 pub static TRANSFER_SHELL_CONTROL: OpenAiTool = OpenAiTool {
     name: "transfer_shell_command_control_to_user",
-    description: "把当前长运行 shell 命令的 PTY 控制权交还给用户。\
-                  适用场景:命令需要用户手动交互且场景不适合用 write_to_long_running_shell_command\
-                  (如交互式登录、需要看终端实时回显才能决定下一步操作等)。\
-                  reason 字段会展示给用户,用于解释为什么要交还。",
+    description: "Hands control of the running command's PTY back to the user. Use it when \
+                  the command needs the user to interact with it directly and \
+                  write_to_long_running_shell_command does not fit, such as an interactive \
+                  login, or when the next step depends on what the terminal shows live. The \
+                  reason is shown to the user to explain why control was handed back.",
     parameters: transfer_parameters,
     from_args: transfer_from_args,
     result_to_json: transfer_result_to_json,

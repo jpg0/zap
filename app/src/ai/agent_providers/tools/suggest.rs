@@ -66,10 +66,11 @@ fn new_conv_result_to_json(result: &api::message::tool_call_result::Result) -> O
 
 pub static SUGGEST_NEW_CONVERSATION: OpenAiTool = OpenAiTool {
     name: "suggest_new_conversation",
-    description: "建议用户从当前 message 处分支出一个新对话。\
-                  适用场景:当前对话上下文已经很长且即将切换主题,或当前任务结束、\
-                  下一个任务与之无关时。UI 会弹出确认框,用户接受才真正分支。\
-                  **不要滥用** — 只在上下文切换收益明显时调。",
+    description: "Suggests branching a new conversation from the current message. Use it when \
+                  this conversation is long and the topic is about to change, or when the task \
+                  is finished and the next one is unrelated. The user is asked to confirm \
+                  before anything branches. Do not overuse it: only suggest a branch when the \
+                  change of context clearly helps.",
     parameters: new_conv_parameters,
     from_args: new_conv_from_args,
     result_to_json: new_conv_result_to_json,
@@ -138,9 +139,10 @@ fn prompt_result_to_json(result: &api::message::tool_call_result::Result) -> Opt
 
 pub static SUGGEST_PROMPT: OpenAiTool = OpenAiTool {
     name: "suggest_prompt",
-    description: "在回答末尾给用户提议下一条 prompt(以 chip 形式展示)。\
-                  适用场景:任务自然延伸出明显的 follow-up(测试通过后建议跑 lint;读完代码建议补单测等)。\
-                  避免给重复或显而易见的建议。",
+    description: "Suggests the user's next prompt, shown as a chip at the end of the reply. \
+                  Use it when the task has an obvious follow-up, such as running lint after \
+                  tests pass, or adding unit tests after reading through code. Avoid repeated \
+                  or obvious suggestions.",
     parameters: prompt_parameters,
     from_args: prompt_from_args,
     result_to_json: prompt_result_to_json,

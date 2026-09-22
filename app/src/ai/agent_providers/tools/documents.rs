@@ -124,9 +124,10 @@ fn read_result_to_json(result: &api::message::tool_call_result::Result) -> Optio
 
 pub static READ_DOCUMENTS: OpenAiTool = OpenAiTool {
     name: "read_documents",
-    description: "读取 Zap Drive 本地文档(由 document_id 引用,不是文件系统中的文件)。\
-                  返回 JSON: { documents: [{document_id, content, line_range?}] }。\
-                  当用户提到具体 document_id 或 Drive 中的特定文档时使用。",
+    description: "Reads local Warp Drive documents, referenced by document_id rather than by \
+                  filesystem path. Returns JSON: { documents: [{document_id, content, \
+                  line_range?}] }. Use it when the user mentions a document_id or a specific \
+                  document in their Drive.",
     parameters: read_parameters,
     from_args: read_from_args,
     result_to_json: read_result_to_json,
@@ -213,9 +214,10 @@ fn edit_result_to_json(result: &api::message::tool_call_result::Result) -> Optio
 
 pub static EDIT_DOCUMENTS: OpenAiTool = OpenAiTool {
     name: "edit_documents",
-    description: "对 Zap Drive 中已存在的 document 做字符串搜索-替换。\
-                  和 apply_file_diffs::edit 相似,但目标是 Drive document(通过 document_id 引用)。\
-                  search 必须与文档现有内容**完全一致**(含空白和换行),否则失败。",
+    description: "Search-and-replace within an existing Warp Drive document. Like \
+                  apply_file_diffs::edit, but the target is a Drive document referenced by \
+                  document_id. The search text must match the document's current content \
+                  exactly, including whitespace and newlines, or the edit fails.",
     parameters: edit_parameters,
     from_args: edit_from_args,
     result_to_json: edit_result_to_json,
@@ -299,8 +301,9 @@ fn create_result_to_json(result: &api::message::tool_call_result::Result) -> Opt
 
 pub static CREATE_DOCUMENTS: OpenAiTool = OpenAiTool {
     name: "create_documents",
-    description: "在 Zap Drive 中创建一个或多个新 document(各带 title + 完整内容)。\
-                  适合把分析结果、笔记、todo 等沉淀为可复用的 Drive 文档。",
+    description: "Creates one or more new Warp Drive documents, each with a title and full \
+                  content. Use it to keep analysis, notes, or todos as reusable Drive \
+                  documents.",
     parameters: create_parameters,
     from_args: create_from_args,
     result_to_json: create_result_to_json,
