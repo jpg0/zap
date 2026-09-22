@@ -162,6 +162,13 @@ impl PromptAlertView {
             return PromptAlertState::NoConnection;
         }
 
+        // Requests to the user's own providers are sent from this client with their own
+        // credentials and never reach Warp, so no credit, plan, or anonymous-user gate
+        // applies to them.
+        if crate::ai::agent_providers::has_configured_providers(app) {
+            return PromptAlertState::NoAlert;
+        }
+
         let request_usage_model = AIRequestUsageModel::as_ref(app);
         // Anonymous soft/hard gates are based on the base-plan request quota,
         // not overall AI availability (bonus grants / BYO / etc.).

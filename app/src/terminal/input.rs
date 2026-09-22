@@ -14983,7 +14983,8 @@ impl Input {
             let scope = user_workspaces.team_context_for_view(ctx);
             AIRequestUsageModel::as_ref(ctx).has_any_ai_remaining(&scope, ctx)
         };
-        if !has_any_ai {
+        // Buying Warp credits does not help a user running their own provider.
+        if !has_any_ai && !crate::ai::agent_providers::has_configured_providers(ctx) {
             AIRequestUsageModel::handle(ctx).update(ctx, |model, ctx| {
                 model.enable_buy_credits_banner(ctx);
             });

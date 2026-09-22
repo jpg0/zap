@@ -116,6 +116,13 @@ pub fn build_byop_llm_infos(app: &AppContext) -> Vec<LLMInfo> {
     out
 }
 
+/// Whether the user has configured any provider of their own. Requests to those providers are
+/// sent from this client with the user's own credentials and never reach Warp, so credit, plan,
+/// and workspace-policy gates do not apply to them.
+pub fn has_configured_providers(app: &AppContext) -> bool {
+    !AISettings::as_ref(app).agent_providers.value().is_empty()
+}
+
 /// 给定一个 BYOP `LLMId`,从 `AISettings` 与 secrets 里查出 `(provider, api_key, model_id)`。
 /// 任一信息缺失返回 `None`(controller 调用方应映射为 `InvalidApiKey` 错误)。
 pub fn lookup_byop(app: &AppContext, id: &ai::LLMId) -> Option<(AgentProvider, String, String)> {
