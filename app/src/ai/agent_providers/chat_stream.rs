@@ -3166,6 +3166,23 @@ fn build_chat_options(
     opts
 }
 
+/// Converts a provider failure into the API error the response stream reports. A rejection the
+/// provider answered with a status travels as `ErrorStatus`, so the recovery logic can decline
+/// to retry a request the provider will refuse again.
+fn byop_stream_api_error(mapped: OpenAiCompatibleError) -> AIApiError {
+    match mapped {
+        OpenAiCompatibleError::Status { status, body } => {
+            match http::StatusCode::from_u16(status) {
+                Ok(status) => AIApiError::ErrorStatus(status, body),
+                Err(_) => AIApiError::Other(anyhow::anyhow!(
+                    "BYOP stream error: HTTP status {status}: {body}"
+                )),
+            }
+        }
+        other => AIApiError::Other(anyhow::anyhow!("BYOP stream error: {other}")),
+    }
+}
+
 fn map_genai_error(err: genai::Error) -> OpenAiCompatibleError {
     use genai::Error as G;
     match err {
@@ -3175,8 +3192,27 @@ fn map_genai_error(err: genai::Error) -> OpenAiCompatibleError {
         | G::JsonValueExt(_)
         | G::InvalidJsonResponseElement { .. } => OpenAiCompatibleError::Decode(format!("{err}")),
 
-        // 网络/流式发送阶段失败(reqwest 连接、TLS、DNS、超时、流中断等)
-        G::WebStream { .. } | G::WebAdapterCall { .. } | G::WebModelCall { .. } => {
+        // A stream that failed because the provider answered with an HTTP status carries that
+        // status as its source. Unwrap it so the status drives retry behaviour: a provider
+        // rejecting the request (an unknown model, say) is not worth retrying.
+        G::WebStream { ref error, .. } => match error.downcast_ref::<genai::Error>() {
+            Some(G::HttpError {
+                status,
+                canonical_reason,
+                body,
+            }) => OpenAiCompatibleError::Status {
+                status: status.as_u16(),
+                body: if canonical_reason.is_empty() {
+                    body.clone()
+                } else {
+                    format!("{canonical_reason}: {body}")
+                },
+            },
+            _ => OpenAiCompatibleError::Stream(format!("{err}")),
+        },
+
+        // The request never got a reply: connection, TLS, DNS, timeout, or a broken stream.
+        G::WebAdapterCall { .. } | G::WebModelCall { .. } => {
             OpenAiCompatibleError::Stream(format!("{err}"))
         }
 
@@ -3699,9 +3735,7 @@ pub async fn generate_byop_output(
                             log::error!("[byop] error bytes[{hex_start}..{hex_end}] hex={slice:02x?}");
                         }
                     }
-                    yield Err(Arc::new(AIApiError::Other(anyhow::anyhow!(
-                        "BYOP stream error: {mapped}"
-                    ))));
+                    yield Err(Arc::new(byop_stream_api_error(mapped)));
                     return;
                 }
             };
@@ -6170,6 +6204,30 @@ mod serializer_readiness_tests {
             },
             context: Arc::<[AIAgentContext]>::from([]),
         }
+    }
+
+    /// A provider that rejects the request (an unloadable model, a bad key) answers with a
+    /// status, and retrying only repeats the rejection. Only failures with no reply are worth
+    /// another attempt.
+    #[test]
+    fn provider_status_errors_are_not_retried() {
+        let rejected = byop_stream_api_error(OpenAiCompatibleError::Status {
+            status: 400,
+            body: "Failed to load model".to_owned(),
+        });
+        assert!(
+            matches!(rejected, AIApiError::ErrorStatus(status, _) if status.as_u16() == 400),
+            "a provider rejection should carry its status, got: {rejected:?}"
+        );
+        assert!(!rejected.is_recoverable());
+
+        let no_reply = byop_stream_api_error(OpenAiCompatibleError::Stream(
+            "connection closed".to_owned(),
+        ));
+        assert!(
+            no_reply.is_recoverable(),
+            "a request that never got a reply is worth retrying"
+        );
     }
 
     fn request_params(messages: Vec<api::Message>, input: Vec<AIAgentInput>) -> RequestParams {
