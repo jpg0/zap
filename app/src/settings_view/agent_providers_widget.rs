@@ -1587,7 +1587,7 @@ impl SettingsWidget for AgentProvidersWidget {
     type View = AgentProvidersPageView;
 
     fn search_terms(&self) -> &str {
-        "agent provider providers custom openai compatible deepseek glm moonshot dashscope qwen ollama base url api key models save 提供商 自定义 模型 保存"
+        "agent provider providers custom openai compatible deepseek glm moonshot dashscope qwen ollama base url api key models save"
     }
 
     fn render(

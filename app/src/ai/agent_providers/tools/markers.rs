@@ -69,7 +69,7 @@ fn transfer_parameters() -> Value {
         "properties": {
             "reason": {
                 "type": "string",
-                "description": "向用户解释为什么需要把控制权交还(例如「现在需要你手动登录交互」)。"
+                "description": "Explains to the user why control is being handed back, for example that they need to log in interactively."
             }
         },
         "additionalProperties": false

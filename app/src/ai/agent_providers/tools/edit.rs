@@ -46,11 +46,11 @@ fn parameters() -> Value {
         "properties": {
             "summary": {
                 "type": "string",
-                "description": "对本次修改的简短中文总结(1 句),会展示给用户审批用。"
+                "description": "A one-sentence summary of this change, shown to the user for approval."
             },
             "operations": {
                 "type": "array",
-                "description": "本次要执行的所有文件操作(可批量)。op 区分子类型: edit/create/delete。",
+                "description": "Every file operation to perform; op selects the kind: edit, create, or delete.",
                 "items": {
                     "oneOf": [
                         {
@@ -58,8 +58,8 @@ fn parameters() -> Value {
                             "properties": {
                                 "op": {"type": "string", "enum": ["edit"]},
                                 "file_path": {"type": "string"},
-                                "search": {"type": "string", "description": "要被替换掉的原文片段(必须与文件中已存在的内容完全一致,包括空白/换行)。"},
-                                "replace": {"type": "string", "description": "替换后的内容。"}
+                                "search": {"type": "string", "description": "The existing text to replace. Must match the file exactly, including whitespace and newlines."},
+                                "replace": {"type": "string", "description": "The replacement text."}
                             },
                             "required": ["op", "file_path", "search", "replace"]
                         },

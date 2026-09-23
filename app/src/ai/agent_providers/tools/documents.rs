@@ -55,14 +55,14 @@ fn read_parameters() -> Value {
         "properties": {
             "documents": {
                 "type": "array",
-                "description": "要读取的 document 列表(每个由 document_id 标识)。",
+                "description": "The documents to read, each identified by its document_id.",
                 "items": {
                     "type": "object",
                     "properties": {
                         "document_id": { "type": "string" },
                         "line_ranges": {
                             "type": "array",
-                            "description": "可选的 1-based 闭区间行号列表,为空读整个文档。",
+                            "description": "Optional inclusive 1-based line ranges. Omit to read the whole document.",
                             "items": {
                                 "type": "object",
                                 "properties": {
@@ -155,18 +155,18 @@ fn edit_parameters() -> Value {
         "properties": {
             "diffs": {
                 "type": "array",
-                "description": "对若干 document 各做一次 search→replace。每条 diff 描述一处替换。",
+                "description": "Applies one search-and-replace per document. Each diff describes a single replacement.",
                 "items": {
                     "type": "object",
                     "properties": {
                         "document_id": { "type": "string" },
                         "search": {
                             "type": "string",
-                            "description": "要被替换的原文(必须与 document 现有内容**完全一致**,含空白和换行)。"
+                            "description": "The existing text to replace. Must match the document exactly, including whitespace and newlines."
                         },
                         "replace": {
                             "type": "string",
-                            "description": "替换后的内容。"
+                            "description": "The replacement text."
                         }
                     },
                     "required": ["document_id", "search", "replace"]
@@ -244,17 +244,17 @@ fn create_parameters() -> Value {
         "properties": {
             "new_documents": {
                 "type": "array",
-                "description": "要创建的新 document 列表。",
+                "description": "The documents to create.",
                 "items": {
                     "type": "object",
                     "properties": {
                         "title": {
                             "type": "string",
-                            "description": "文档标题(在 Drive 中显示)。"
+                            "description": "The document title, shown in Drive."
                         },
                         "content": {
                             "type": "string",
-                            "description": "文档完整内容(markdown / 纯文本)。"
+                            "description": "The document's full content, as markdown or plain text."
                         }
                     },
                     "required": ["title", "content"]

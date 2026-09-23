@@ -24,12 +24,12 @@ fn grep_parameters() -> Value {
         "properties": {
             "queries": {
                 "type": "array",
-                "description": "要搜索的关键字/正则模式列表(每个元素是一个独立查询,任一命中都算匹配)。",
+                "description": "Keywords or regular expressions to search for. Each is a separate query and any match counts.",
                 "items": {"type": "string"}
             },
             "path": {
                 "type": "string",
-                "description": "搜索范围的相对路径(文件或目录)。空字符串或 \".\" 表示当前工作目录。",
+                "description": "The file or directory to search, relative to the working directory. An empty string or \".\" means the working directory.",
                 "default": "."
             }
         },
@@ -106,17 +106,17 @@ fn glob_parameters() -> Value {
         "properties": {
             "patterns": {
                 "type": "array",
-                "description": "文件名通配符列表(支持 ?、*、[…])。例如 [\"**/*.rs\", \"src/**/*.toml\"]。",
+                "description": "Filename globs, supporting ?, * and […]. For example [\"**/*.rs\", \"src/**/*.toml\"].",
                 "items": {"type": "string"}
             },
             "search_dir": {
                 "type": "string",
-                "description": "搜索目录的相对路径,空表示当前工作目录。",
+                "description": "The directory to search, relative to the working directory. Empty means the working directory.",
                 "default": "."
             },
             "limit": {
                 "type": "integer",
-                "description": "最大返回条数;0 或缺省表示不限。",
+                "description": "Maximum number of results. Zero or omitted means no limit.",
                 "default": 0
             }
         },

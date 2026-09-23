@@ -1545,11 +1545,11 @@ fn build_chat_request(
                 skill, user_query, ..
             } => {
                 let mut composed = format!(
-                    "请按下面的技能 \"{}\" 指引执行任务:\n\n{}\n\n---\n",
+                    "Follow the instructions in the skill \"{}\" to carry out the task:\n\n{}\n\n---\n",
                     skill.name, skill.content,
                 );
                 if let Some(uq) = user_query {
-                    composed.push_str(&format!("用户进一步指令: {}", uq.query));
+                    composed.push_str(&format!("Further instructions from the user: {}", uq.query));
                 }
                 messages.push(ChatMessage::user(composed));
             }
@@ -1687,10 +1687,6 @@ const REPAIR_PLACEHOLDER_NOTE: &str =
     "tool result was unavailable in repaired conversation history";
 
 fn is_placeholder_tool_response_content(content: &str) -> bool {
-    if content == "(tool 执行结果未保留)" {
-        return true;
-    }
-
     let Ok(Value::Object(object)) = serde_json::from_str::<Value>(content) else {
         return false;
     };
@@ -2241,7 +2237,7 @@ fn repair_tool_call_pairs_for_accepted_history_gaps(
 
     if !orphan_call_ids.is_empty() {
         log::warn!(
-            "[byop-diag] accepted_history_repair: 丢弃 {} 个孤儿 ToolResponse: \
+            "[byop-diag] accepted_history_repair: dropping {} orphaned tool response(s): \
              orphan_call_ids={:?}",
             orphan_call_ids.len(),
             orphan_call_ids
@@ -2249,7 +2245,7 @@ fn repair_tool_call_pairs_for_accepted_history_gaps(
     }
     if !placeholders_inserted.is_empty() {
         log::info!(
-            "[byop-diag] accepted_history_repair: 给 {} 个 ToolCall 补 repair placeholder \
+            "[byop-diag] accepted_history_repair: adding repair placeholders for {} tool call(s) \
              ToolResponse: missing_call_ids={:?}",
             placeholders_inserted.len(),
             placeholders_inserted
@@ -2261,7 +2257,7 @@ fn repair_tool_call_pairs_for_accepted_history_gaps(
         // tool call key 来源出现了不一致(例如未来重构 projection 或 outbound_tool_groups 构建逻辑
         // 引入差异)。此时不能继续发出缺失 ToolResponse 的非法请求,必须阻断。
         log::error!(
-            "[byop-diag] accepted_history_repair: readiness 未授权的缺失 ToolResponse: \
+            "[byop-diag] accepted_history_repair: missing tool response not authorized by readiness: \
              missing_call_ids={:?}",
             missing_without_repair
         );
@@ -3693,7 +3689,7 @@ pub async fn generate_byop_output(
                         let byte_len = body.len();
                         let start = col.saturating_sub(200).min(byte_len);
                         let end = (col + 200).min(byte_len);
-                        let context = body.get(start..end).unwrap_or("(slice failed: 非 char 边界)");
+                        let context = body.get(start..end).unwrap_or("(slice failed: not a char boundary)");
                         log::error!(
                             "[byop] error column={col} diag_body_len={byte_len} context[{start}..{end}]={context:?}"
                         );
@@ -6937,7 +6933,7 @@ mod serializer_readiness_tests {
             payload["note"],
             "tool result was unavailable in repaired conversation history"
         );
-        assert!(!response.content.contains("(tool 执行结果未保留)"));
+        
         assert!(
             params.tasks[0].messages.iter().all(|message| !matches!(
                 message.message,
@@ -7363,16 +7359,16 @@ mod accepted_history_repair_tests {
         );
     }
 
-    /// placeholder 不能覆盖已存在的真实 result。
-    /// 该场景出现在:上轮补过 placeholder 作为占位 → 本轮着落真实结果 →
-    /// 又遇到同 call_id 的 placeholder(比如 fork 后拼接)。需保证真实不会被陯害。
+    /// A placeholder must never overwrite a real result. This happens when an earlier turn
+    /// wrote a placeholder, the real result arrived later, and another placeholder for the same
+    /// call id shows up afterwards, such as when forked history is spliced in.
     #[test]
     fn placeholder_does_not_overwrite_existing_real_response() {
         let mut msgs = vec![
             ChatMessage::user("q1"),
             assistant_with_calls(&["a"]),
             tool_response("a", "real_a"),
-            tool_response("a", "(tool 执行结果未保留)"),
+            tool_response("a", &repair_placeholder_content(RepairSource::ForkedHistory)),
         ];
         repair_messages(&mut msgs);
 
@@ -7380,17 +7376,17 @@ mod accepted_history_repair_tests {
         assert_eq!(
             responses_of(&msgs[2]),
             vec![("a".to_owned(), "real_a".to_owned())],
-            "placeholder 不能覆盖真实值"
+            "a placeholder must not overwrite a real result"
         );
     }
 
-    /// 已污染历史可能同时含 placeholder 和晚到的真实 result;真实 result 应覆盖占位。
+    /// Damaged history can hold both a placeholder and a late real result; the real one wins.
     #[test]
     fn placeholder_is_replaced_by_late_real_tool_response() {
         let mut msgs = vec![
             ChatMessage::user("q1"),
             assistant_with_calls(&["a"]),
-            tool_response("a", "(tool 执行结果未保留)"),
+            tool_response("a", &repair_placeholder_content(RepairSource::ForkedHistory)),
             ChatMessage::user("interrupt"),
             tool_response("a", "real_a"),
         ];

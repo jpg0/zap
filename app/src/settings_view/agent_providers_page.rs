@@ -574,7 +574,7 @@ impl TypedActionView for AgentProvidersPageView {
                                 view.rebuild_current_page(ctx);
                             }
                             Err(e) => {
-                                log::warn!("[models.dev] 拉取失败: {e}");
+                                log::warn!("[models.dev] catalog fetch failed: {e}");
                                 models_dev::set_fetch_failed(true);
                                 ctx.notify();
                             }
@@ -595,7 +595,7 @@ impl TypedActionView for AgentProvidersPageView {
                             view.rebuild_current_page(ctx);
                         }
                         Err(e) => {
-                            log::warn!("[models.dev] 刷新失败: {e}");
+                            log::warn!("[models.dev] catalog refresh failed: {e}");
                             models_dev::set_fetch_failed(true);
                             ctx.notify();
                         }
@@ -607,11 +607,11 @@ impl TypedActionView for AgentProvidersPageView {
             } => {
                 use crate::ai::agent_providers::models_dev;
                 let Some(catalog) = models_dev::cached() else {
-                    log::warn!("[models.dev] 目录尚未加载,无法添加 {catalog_provider_id}");
+                    log::warn!("[models.dev] catalog not loaded yet; cannot add {catalog_provider_id}");
                     return;
                 };
                 let Some(cat_provider) = catalog.get(catalog_provider_id) else {
-                    log::warn!("[models.dev] 目录中无 provider id: {catalog_provider_id}");
+                    log::warn!("[models.dev] no such provider id in the catalog: {catalog_provider_id}");
                     return;
                 };
                 let mut new_provider = crate::settings::AgentProvider::new_empty();
@@ -638,7 +638,7 @@ impl TypedActionView for AgentProvidersPageView {
             AgentProvidersPageAction::SyncProviderModelsFromModelsDev { provider_id } => {
                 use crate::ai::agent_providers::models_dev;
                 let Some(catalog) = models_dev::cached() else {
-                    log::warn!("[models.dev] 目录未加载,无法同步 {provider_id}");
+                    log::warn!("[models.dev] catalog not loaded; cannot sync {provider_id}");
                     return;
                 };
                 let providers_snapshot = AISettings::as_ref(ctx).agent_providers.value().clone();
@@ -665,7 +665,7 @@ impl TypedActionView for AgentProvidersPageView {
                 });
                 let Some((_, cat_provider)) = cat_provider else {
                     log::warn!(
-                        "[models.dev] 未在目录中找到匹配 (base_url={}, name={})",
+                        "[models.dev] no catalog match (base_url={}, name={})",
                         local.base_url,
                         local.name
                     );

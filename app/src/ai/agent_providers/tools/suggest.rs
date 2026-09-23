@@ -27,7 +27,7 @@ fn new_conv_parameters() -> Value {
         "properties": {
             "message_id": {
                 "type": "string",
-                "description": "可选: 从哪条 assistant message 处分支新对话(留空则用当前 message)。"
+                "description": "Optional: the assistant message to branch from. Defaults to the current message."
             }
         },
         "additionalProperties": false
@@ -95,11 +95,11 @@ fn prompt_parameters() -> Value {
         "properties": {
             "prompt": {
                 "type": "string",
-                "description": "建议给用户的下一条 prompt(用户点击后实际发给 agent)。"
+                "description": "The prompt to suggest, sent to the agent as-is if the user picks it."
             },
             "label": {
                 "type": "string",
-                "description": "可选: chip 上显示的短标签(prompt 较长时建议提供)。"
+                "description": "Optional short label for the chip, worth setting when the prompt is long."
             }
         },
         "required": ["prompt"],
