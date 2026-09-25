@@ -281,6 +281,60 @@ fn pending_title_generation(
     })
 }
 
+/// Replaces any provider model id in a request bound for Warp with that feature's Warp
+/// default. A user can select a provider model for one feature (the CLI agent picker, say)
+/// while the base model is still served by Warp, and the request carries every feature's model.
+fn without_byop_model_ids(
+    mut params: api::RequestParams,
+    ctx: &warpui::AppContext,
+) -> api::RequestParams {
+    use crate::ai::llms::LLMPreferences;
+    use crate::workspaces::user_workspaces::UserWorkspaces;
+
+    let preferences = LLMPreferences::as_ref(ctx);
+    if [
+        &params.model,
+        &params.coding_model,
+        &params.cli_agent_model,
+        &params.computer_use_model,
+    ]
+    .iter()
+    .all(|id| preferences.byop_llm_info_for_id(id).is_none())
+    {
+        return params;
+    }
+
+    let models = UserWorkspaces::as_ref(ctx).feature_model_choice_for_team_uid(None);
+    let mut replace = |id: &mut crate::ai::llms::LLMId, fallback: Option<&crate::ai::llms::LLMId>| {
+        if preferences.byop_llm_info_for_id(id).is_some()
+            && let Some(fallback) = fallback
+        {
+            log::debug!("[byop] replacing provider model {id:?} with {fallback:?} for a Warp request");
+            *id = fallback.clone();
+        }
+    };
+    let agent_mode_default = models.agent_mode.default_id();
+    replace(&mut params.model, Some(agent_mode_default));
+    replace(&mut params.coding_model, Some(models.coding.default_id()));
+    replace(
+        &mut params.cli_agent_model,
+        models
+            .cli_agent
+            .as_ref()
+            .map(|available| available.default_id())
+            .or(Some(agent_mode_default)),
+    );
+    replace(
+        &mut params.computer_use_model,
+        models
+            .computer_use
+            .as_ref()
+            .map(|available| available.default_id())
+            .or(Some(agent_mode_default)),
+    );
+    params
+}
+
 struct ByopTarget {
     provider: crate::settings::AgentProvider,
     api_key: String,
@@ -923,6 +977,9 @@ impl ResponseStream {
             }
             Err(cancellation_rx) => cancellation_rx,
         };
+        // Warp's servers cannot resolve a provider model id, and reject the whole request when
+        // one appears in any model field, so replace them before sending.
+        let params = without_byop_model_ids(params, ctx);
         let server_api = ServerApiProvider::as_ref(ctx).get();
         let _ = ctx.spawn(
             async move {

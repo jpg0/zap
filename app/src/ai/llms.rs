@@ -541,6 +541,11 @@ impl AvailableLLMs {
             .or_else(|| self.choices.iter().find(|info| is_usable_llm(info, app)))
     }
 
+    /// The Warp default for this feature.
+    pub fn default_id(&self) -> &LLMId {
+        &self.default_id
+    }
+
     fn default_llm_info(&self) -> &LLMInfo {
         if let Some(info) = self.info_for_id(&self.default_id) {
             return info;
@@ -1031,6 +1036,7 @@ impl LLMPreferences {
                 routers_enabled || !custom_model_routers::is_cloud_custom_router_id(llm.id.as_str())
             })
             .chain(self.custom_llm_choices(app))
+            .chain(self.byop_llm_choices())
             .chain(self.custom_router_choices())
     }
 
@@ -1314,13 +1320,21 @@ impl LLMPreferences {
     }
 
     /// Iterator over the user's custom-endpoint LLMs, gated on the feature flag and entitlement.
-    pub fn custom_llm_choices(&self, app: &AppContext) -> impl Iterator<Item = &LLMInfo> + Clone {
-        let custom: &[LLMInfo] = if Self::custom_inference_enabled(app) {
-            &self.custom_llms
+    pub fn custom_llm_choices(&self, app: &AppContext) -> std::slice::Iter<'_, LLMInfo> {
+        if Self::custom_inference_enabled(app) {
+            self.custom_llms.iter()
         } else {
-            &[]
-        };
-        self.byop_llms.iter().chain(custom.iter())
+            // Empty slice with a matching element type so the return type stays consistent
+            // across both branches.
+            (&[] as &[LLMInfo]).iter()
+        }
+    }
+
+    /// The user's own provider models. They are offered for agent mode only: this client calls
+    /// the provider directly for the conversation, and has no such path for the coding, CLI
+    /// agent, or computer-use models, which are resolved by Warp's servers.
+    pub fn byop_llm_choices(&self) -> std::slice::Iter<'_, LLMInfo> {
+        self.byop_llms.iter()
     }
 
     /// Model used for conversation title generation (BYOP). Uses the active base model.

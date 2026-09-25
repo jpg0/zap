@@ -1,4 +1,6 @@
 pub mod ai_agent_tasks;
+#[cfg(test)]
+pub mod byop;
 pub mod settings;
 pub mod terminal;
 mod virtual_fs;

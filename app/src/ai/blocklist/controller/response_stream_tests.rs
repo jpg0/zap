@@ -318,3 +318,49 @@ fn geap_refresh_does_not_add_credentials_to_a_keyless_request() {
 
     assert!(params.api_keys.is_none());
 }
+
+/// Warp's servers reject a request carrying a model id they cannot resolve, failing the whole
+/// turn. A provider model can reach a Warp-bound request through any of the per-feature model
+/// fields, so they are replaced before the request is sent.
+#[test]
+fn provider_model_ids_are_replaced_for_warp_requests() {
+    use crate::ai::agent::api::RequestParams;
+    use crate::ai::agent_providers::llm_id;
+    use crate::ai::llms::LLMPreferences;
+    use crate::settings::AISettings;
+    use crate::test_util::byop::{init_byop_test_app, sample_provider};
+    use warpui::{App, SingletonEntity};
+
+    use settings::Setting as _;
+
+    use super::without_byop_model_ids;
+
+    App::test((), |mut app| async move {
+        init_byop_test_app(&mut app);
+
+        let provider_id = "provider-server-request";
+        app.update(|ctx| {
+            AISettings::handle(ctx).update(ctx, |settings, ctx| {
+                let _ = settings
+                    .agent_providers
+                    .set_value(vec![sample_provider(provider_id)], ctx);
+            });
+        });
+
+        let byop_id = llm_id::encode(provider_id, "llama3.2");
+        app.read(|ctx| {
+            let mut params = RequestParams::new_for_byop_test(vec![], vec![]);
+            params.cli_agent_model = byop_id.clone();
+            let sanitized = without_byop_model_ids(params, ctx);
+            assert_ne!(
+                sanitized.cli_agent_model, byop_id,
+                "a provider model id must not be sent to Warp"
+            );
+            assert!(
+                LLMPreferences::as_ref(ctx)
+                    .byop_llm_info_for_id(&sanitized.cli_agent_model)
+                    .is_none()
+            );
+        });
+    });
+}
