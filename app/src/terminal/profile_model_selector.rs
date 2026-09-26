@@ -718,6 +718,7 @@ impl ProfileModelSelector {
             );
             let llm_preferences = LLMPreferences::as_ref(ctx);
             let active_llm = if FeatureFlag::InlineMenuHeaders.is_enabled()
+                && !crate::ai::agent_providers::has_configured_providers(ctx)
                 && self
                     .terminal_model
                     .lock()
@@ -1727,7 +1728,10 @@ impl ProfileModelSelector {
             self.harness_model_display_name(app)
         } else {
             let scope = UserWorkspaces::as_ref(app).team_context(&self.self_handle, app);
-            if is_lrc {
+            // A user on their own provider has no server to switch models mid-turn, so the
+            // base model serves the attached command too, and naming another model would be
+            // wrong.
+            if is_lrc && !crate::ai::agent_providers::has_configured_providers(app) {
                 llm_preferences
                     .get_active_cli_agent_model(&scope, app, Some(self.terminal_view_id))
                     .menu_display_name()
