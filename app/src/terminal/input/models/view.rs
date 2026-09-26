@@ -137,7 +137,18 @@ impl InlineModelSelectorView {
             ModelSelectorDataSource::new(terminal_view_id, team_context, None)
         });
 
-        let tab_configs = TAB_CONFIGS.clone();
+        // The full-terminal-use tab picks the model Warp's servers run when the agent takes
+        // over the terminal. A user on their own provider has no such server: their base model
+        // serves that turn too, so the tab would only offer models they cannot reach.
+        let tab_configs: Vec<_> = if crate::ai::agent_providers::has_configured_providers(ctx) {
+            TAB_CONFIGS
+                .iter()
+                .filter(|config| config.id != InlineModelSelectorTab::FullTerminalUse)
+                .cloned()
+                .collect()
+        } else {
+            TAB_CONFIGS.clone()
+        };
         let initial_filters = tab_configs
             .first()
             .map(|config| config.filters.clone())
@@ -203,6 +214,12 @@ impl InlineModelSelectorView {
                         .is_some_and(|c| !c.is_empty() && c.status().is_in_progress());
                     let is_cli_agent_in_control_or_tagged_in =
                         cli_ctrl.as_ref(app).is_agent_in_control_or_tagged_in();
+                    // With a provider model there is no server to switch models mid-turn: the
+                    // base model serves the full-terminal-use turn as well, so the mismatch
+                    // warning would be wrong.
+                    if crate::ai::agent_providers::has_configured_providers(app) {
+                        return None;
+                    }
                     let message = match active_tab {
                         InlineModelSelectorTab::FullTerminalUse if main_agent_in_progress && !is_cli_agent_in_control_or_tagged_in => {
                             Some("You're using the base agent. Full terminal use models only apply to the full terminal use agent.")
