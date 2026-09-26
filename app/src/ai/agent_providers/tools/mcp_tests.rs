@@ -4,10 +4,10 @@
 //! 跨请求同一 `MCPContext` 调多次产出 byte-equal 的 tools 列表,否则
 //! Anthropic 会判定 tools 字段改动 → 全部缓存层失效。
 //!
-//! 注:`rmcp::model::Tool` 与 `rmcp::model::Resource`(= `Annotated<RawResource>`)
-//! 来自上游 vendor crate,这里只用其公开构造路径(`Tool::new` / `RawResource::new`)。
+//! `rmcp::model::Tool` and `rmcp::model::Resource` come from the rmcp crate; only their
+//! public constructors are used here.
 
-use rmcp::model::{AnnotateAble, RawResource, Tool};
+use rmcp::model::{Resource, Tool};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -41,16 +41,15 @@ fn mk_server(
     MCPServer {
         id: id.to_owned(),
         name: name.to_owned(),
+        warp_id: String::new(),
         description: String::new(),
         resources,
         tools,
     }
 }
 
-fn mk_resource(uri: &str, name: &str) -> rmcp::model::Resource {
-    // RawResource → Annotated<RawResource>(不带 annotation)。
-    // 上游提供的安全转换入口是 `AnnotateAble::no_annotation`。
-    RawResource::new(uri, name).no_annotation()
+fn mk_resource(uri: &str, name: &str) -> Resource {
+    Resource::new(uri, name)
 }
 
 /// 同一 ctx,build 两次,产出 (name, description, schema) 三元组必须 byte-equal。

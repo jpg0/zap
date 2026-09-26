@@ -3042,40 +3042,40 @@ impl AgentDriver {
             .map_err(|_| AgentDriverError::InvalidRuntimeState)
             .flatten()?;
 
-        let (prompt_text, system_prompt, resumption_prompt, server_context): (
-            Cow<'_, str>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        ) = match prompt {
-            AgentRunPrompt::Local(text) => (Cow::Borrowed(text), None, None, None),
-            AgentRunPrompt::ServerSide {
-                skill,
-                attachments_dir,
-            } => {
-                let skill = skill
-                    .as_ref()
-                    .map(|parsed_skill| ResolvePromptAttachedSkill {
-                        name: parsed_skill.name.clone(),
-                        content: parsed_skill.content.clone(),
-                        path: Some(parsed_skill.path.display_path()),
-                    });
-                let request = ResolvePromptRequest {
+        let (prompt_text, system_prompt, resumption_prompt, server_context, usage_context) =
+            match prompt {
+                AgentRunPrompt::Local(text) => {
+                    (Cow::Borrowed(text.as_str()), None, None, None, None)
+                }
+                AgentRunPrompt::ServerSide {
                     skill,
-                    attachments_dir: attachments_dir.clone(),
-                };
-                let resolved = server_api
-                    .resolve_prompt(request)
-                    .await
+                    attachments_dir,
+                } => {
+                    let skill = skill
+                        .as_ref()
+                        .map(|parsed_skill| ResolvePromptAttachedSkill {
+                            name: parsed_skill.name.clone(),
+                            content: parsed_skill.content.clone(),
+                            path: Some(parsed_skill.path.display_path()),
+                        });
+                    let request = ResolvePromptRequest {
+                        skill,
+                        attachments_dir: attachments_dir.clone(),
+                    };
+                    let resolved = match task_id.as_ref() {
+                        Some(task_id) => server_api.resolve_prompt_for_task(task_id, request).await,
+                        None => server_api.resolve_prompt(request).await,
+                    }
                     .map_err(AgentDriverError::PromptResolutionFailed)?;
-                (
-                    Cow::Owned(resolved.prompt),
-                    resolved.system_prompt,
-                    resolved.resumption_prompt,
-                    resolved.context,
-                )
-            }
-        };
+                    (
+                        Cow::Owned(resolved.prompt),
+                        resolved.system_prompt,
+                        resolved.resumption_prompt,
+                        resolved.context,
+                        resolved.harness_usage,
+                    )
+                }
+            };
 
         let (secrets, third_party_harness_model_config) = foreground
             .spawn(|me, _| {
@@ -3121,7 +3121,7 @@ impl AgentDriver {
                 &workspace_root,
                 &harness_working_dir,
                 task_id,
-                server_api,
+                server_api.clone(),
                 terminal_driver,
                 resume,
                 &resolved_env_vars,
@@ -3130,6 +3130,9 @@ impl AgentDriver {
                 third_party_harness_model_config.as_ref(),
             )?
             .into();
+        runner
+            .persistence()
+            .initialize(server_api, task_id, usage_context);
 
         let stored_runner = runner.clone();
         foreground
@@ -3187,9 +3190,9 @@ impl AgentDriver {
                     log::debug!("Triggering periodic save of harness conversation data");
                     report_if_error!(runner
                         .clone()
-                        .request_save(SavePoint::Periodic, foreground)
+                        .enqueue_save(SavePoint::Periodic, foreground)
                         .await
-                        .context("Failed to save harness conversation (periodic)"));
+                        .context("Failed to enqueue periodic harness conversation save"));
                 }
                 _ = harness_exit_rx => {
                     break Self::escalate_harness_exit(
@@ -3270,12 +3273,13 @@ impl AgentDriver {
         };
         // Final save after the command finishes.
         log::debug!("Triggering final save of harness conversation data");
-        let final_save_result = runner
-            .finish_saves(foreground)
-            .await
-            .context("Failed to save final harness conversation");
-        let final_save_succeeded = final_save_result.is_ok();
-        report_if_error!(final_save_result);
+        let final_save_succeeded = match runner.finalize_saves(foreground).await {
+            Ok(()) => true,
+            Err(_) => {
+                log::warn!("Harness final conversation save failed");
+                false
+            }
+        };
         let cleanup_disposition = if final_save_succeeded
             && detected_runtime_failure.is_none()
             && matches!(command_result.as_ref(), Ok(exit_code) if exit_code.was_successful())
@@ -3446,12 +3450,9 @@ impl AgentDriver {
             return;
         };
         Self::force_kill_harness(foreground).await;
-        report_if_error!(
-            runner
-                .finish_saves(foreground)
-                .await
-                .context("Failed to save final harness conversation after interruption")
-        );
+        if runner.finalize_saves(foreground).await.is_err() {
+            log::warn!("Harness final save after interruption failed");
+        }
     }
 
     /// Best-effort SIGKILL of the harness process group on this driver's terminal.
@@ -4298,9 +4299,9 @@ impl AgentDriver {
             async move {
                 report_if_error!(
                     runner
-                        .request_save(SavePoint::PostTurn, &foreground)
+                        .enqueue_save(SavePoint::PostTurn, &foreground)
                         .await
-                        .context("Failed to request harness conversation save")
+                        .context("Failed to enqueue harness conversation save")
                 );
             },
             |_, _, _| {},
