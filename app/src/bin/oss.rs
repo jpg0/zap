@@ -3,8 +3,8 @@
 #![cfg_attr(feature = "release_bundle", windows_subsystem = "windows")]
 
 use anyhow::Result;
-use warp_core::AppId;
 use warp_core::channel::{Channel, ChannelConfig, ChannelState, OzConfig, WarpServerConfig};
+use warp_core::{AppId, features};
 
 // Simple wrapper around warp::run() for Warp OSS builds.
 fn main() -> Result<()> {
@@ -22,7 +22,13 @@ fn main() -> Result<()> {
         },
     );
     if cfg!(debug_assertions) {
-        state = state.with_additional_features(warp_core::features::DEBUG_FLAGS);
+        state = state.with_additional_features(features::DEBUG_FLAGS);
+    }
+    // OSS builds never apply RELEASE_FLAGS, so enable the SSH remote server flag explicitly to
+    // exercise that feature in local builds. Gate matches RELEASE_FLAGS (unsupported on Windows).
+    #[cfg(not(windows))]
+    {
+        state = state.with_additional_features(&[features::FeatureFlag::SshRemoteServer]);
     }
     ChannelState::set(state);
 
