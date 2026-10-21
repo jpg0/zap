@@ -21,6 +21,7 @@ use genai::chat::{ChatMessage, ChatOptions, ChatRequest, ChatStreamEvent};
 use warpui::{AppContext, EntityId, SingletonEntity as _};
 
 use super::chat_stream;
+use super::header_vars::HeaderVars;
 use crate::ai::agent::conversation::AIConversationId;
 use crate::ai::llms::LLMPreferences;
 use crate::settings::{AgentProviderApiType, ReasoningEffortSetting};
@@ -85,6 +86,14 @@ fn build_oneshot_request(
 
     let max_chars = opts.max_chars.unwrap_or(DEFAULT_MAX_CHARS);
     let user_truncated = truncate_chars(user, max_chars);
+
+    let headers = super::header_vars::resolve_headers(
+        &cfg.extra_headers,
+        &HeaderVars::default().with_conversation_id(cfg.conversation_id),
+    );
+    if !headers.is_empty() {
+        chat_opts = chat_opts.with_extra_headers(headers);
+    }
 
     let chat_req = ChatRequest::from_messages(vec![ChatMessage::user(user_truncated)])
         .with_system(system.to_owned());
@@ -207,3 +216,6 @@ pub fn resolve_next_command_oneshot(
     })
 }
 
+#[cfg(test)]
+#[path = "oneshot_tests.rs"]
+mod tests;
