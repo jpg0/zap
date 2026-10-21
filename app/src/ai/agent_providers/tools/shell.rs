@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use warp_multi_agent_api as api;
 
 use super::OpenAiTool;
@@ -107,6 +107,11 @@ fn result_to_json(result: &api::message::tool_call_result::Result) -> Option<Val
         Some(ShellR::PermissionDenied(_)) => json!({
             "status": "permission_denied",
             "command": r.command,
+        }),
+        Some(ShellR::TerminalBusy(busy)) => json!({
+            "status": "terminal_busy",
+            "command": r.command,
+            "running_command_id": busy.running_command_id,
         }),
         None => json!({ "status": "cancelled", "command": r.command }),
     };

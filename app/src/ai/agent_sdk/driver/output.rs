@@ -38,7 +38,8 @@ pub mod text {
             | AIAgentInput::MessagesReceivedFromAgents { .. }
             | AIAgentInput::PassiveSuggestionResult { .. }
             | AIAgentInput::EventsFromAgents { .. }
-            | AIAgentInput::OrchestrationConfigUpdate { .. } => {
+            | AIAgentInput::OrchestrationConfigUpdate { .. }
+            | AIAgentInput::AgentWake => {
                 // Do not include the user query, since it's already provided as input to the agent.
                 Ok(())
             }
@@ -53,12 +54,22 @@ pub mod text {
                         exit_code,
                         ..
                     } => writeln!(w, "{output}\n\n (`{command}` exited with code {exit_code})"),
+                    RequestCommandOutputResult::ShellRecovered {
+                        command,
+                        output,
+                        status,
+                        ..
+                    } => writeln!(
+                        w,
+                        "{output}\n\n (`{command}` terminated the persistent shell: {status})"
+                    ),
                     RequestCommandOutputResult::LongRunningCommandSnapshot { command, .. } => {
                         writeln!(w, "`{command}` is still running...")
                     }
                     RequestCommandOutputResult::CancelledBeforeExecution => {
                         writeln!(w, "{CANCELLED_MESSAGE}")
                     }
+                    RequestCommandOutputResult::TerminalBusy { .. } => writeln!(w, "{result}"),
                     RequestCommandOutputResult::Denylisted { .. } => {
                         writeln!(
                             w,
@@ -709,7 +720,11 @@ pub mod json {
     #[derive(Serialize)]
     #[serde(tag = "status", rename_all = "snake_case")]
     enum JsonRunCommandResult<'a> {
-        Complete { exit_code: i32, output: &'a str },
+        Complete {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            exit_code: Option<i32>,
+            output: &'a str,
+        },
         Running,
     }
 
@@ -830,7 +845,8 @@ pub mod json {
                 | AIAgentInput::MessagesReceivedFromAgents { .. }
                 | AIAgentInput::EventsFromAgents { .. }
                 | AIAgentInput::PassiveSuggestionResult { .. }
-                | AIAgentInput::OrchestrationConfigUpdate { .. } => None,
+                | AIAgentInput::OrchestrationConfigUpdate { .. }
+                | AIAgentInput::AgentWake => None,
                 // These input types should not occur in a SDK-run agent.
                 AIAgentInput::ResumeConversation { .. }
                 | AIAgentInput::TriggerPassiveSuggestion { .. } => None,
@@ -847,10 +863,18 @@ pub mod json {
                         output, exit_code, ..
                     } => Some(JsonMessage::ToolResult(JsonToolResult::RunCommand(
                         JsonRunCommandResult::Complete {
-                            exit_code: exit_code.value(),
+                            exit_code: Some(exit_code.value()),
                             output,
                         },
                     ))),
+                    RequestCommandOutputResult::ShellRecovered { output, status, .. } => {
+                        Some(JsonMessage::ToolResult(JsonToolResult::RunCommand(
+                            JsonRunCommandResult::Complete {
+                                exit_code: status.code(),
+                                output,
+                            },
+                        )))
+                    }
                     RequestCommandOutputResult::LongRunningCommandSnapshot { .. } => {
                         Some(JsonMessage::ToolResult(JsonToolResult::RunCommand(
                             JsonRunCommandResult::Running,
@@ -864,6 +888,11 @@ pub mod json {
                             "Command was not allowed to run due to presence on denylist",
                         ),
                     }),
+                    RequestCommandOutputResult::TerminalBusy { .. } => {
+                        Some(JsonMessage::ToolError {
+                            error: Cow::Owned(result.to_string()),
+                        })
+                    }
                 },
                 AIAgentActionResultType::WriteToLongRunningShellCommand(result) => match result {
                     WriteToLongRunningShellCommandResult::Snapshot { .. } => {
@@ -877,7 +906,7 @@ pub mod json {
                         ..
                     } => Some(JsonMessage::ToolResult(JsonToolResult::RunCommand(
                         JsonRunCommandResult::Complete {
-                            exit_code: exit_code.value(),
+                            exit_code: Some(exit_code.value()),
                             output,
                         },
                     ))),

@@ -11,7 +11,7 @@
 
 use anyhow::Result;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use warp_multi_agent_api as api;
 
 use super::OpenAiTool;
@@ -105,8 +105,13 @@ fn from_args(args: &str) -> Result<api::message::tool_call::Tool> {
                 search,
                 replace,
             }),
-            Operation::Create { file_path, content } => new_files
-                .push(api::message::tool_call::apply_file_diffs::NewFile { file_path, content, ..Default::default() }),
+            Operation::Create { file_path, content } => {
+                new_files.push(api::message::tool_call::apply_file_diffs::NewFile {
+                    file_path,
+                    content,
+                    ..Default::default()
+                })
+            }
             Operation::Delete { file_path } => deleted_files
                 .push(api::message::tool_call::apply_file_diffs::DeleteFile { file_path }),
         }

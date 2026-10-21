@@ -8,8 +8,6 @@ pub(crate) mod agent_conversations_model;
 pub(crate) mod agent_events;
 pub(crate) mod agent_management;
 pub(crate) mod agent_providers;
-pub(crate) mod byop_compaction;
-pub(crate) mod byop_readiness;
 pub(crate) mod agent_tips;
 pub(crate) mod ai_document_view;
 pub mod ambient_agents;
@@ -23,6 +21,9 @@ pub mod aws_credentials;
 pub(crate) mod bedrock_credentials;
 pub(crate) mod block_context;
 pub(crate) mod blocklist;
+pub(crate) mod byop_compaction;
+pub(crate) mod byop_readiness;
+pub mod chatgpt_subscription;
 #[cfg(any(feature = "local_fs", not(target_family = "wasm")))]
 pub(crate) mod codebase_auto_indexing;
 pub mod control_code_parser;

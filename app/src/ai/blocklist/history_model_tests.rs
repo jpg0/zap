@@ -43,6 +43,7 @@ use crate::persistence::model::{
 use crate::server::ids::ServerId;
 use crate::server::server_api::ServerApiProvider;
 use crate::server::telemetry::context_provider::AppTelemetryContextProvider;
+use crate::terminal::model::block::BlockId;
 use crate::terminal::model::session::SessionId;
 use crate::test_util::ai_agent_tasks::create_api_task;
 use crate::test_util::settings::{
@@ -244,9 +245,7 @@ fn create_user_query_message(
                 referenced_attachments: HashMap::new(),
                 mode: None,
                 intended_agent: Default::default(),
-                origin: None,
-                author: None,
-                source_message: None,
+                ..Default::default()
             },
         )),
         request_id: request_id.to_string(),
@@ -807,6 +806,7 @@ fn test_initialize_historical_conversations_resolves_parent_agent_id_children_vi
                     last_event_sequence: None,
                     pinned: false,
                     compaction_state_json: None,
+                    use_warp_credits_instead_of_chatgpt: false,
                 },
                 now,
                 None,
@@ -830,6 +830,7 @@ fn test_initialize_historical_conversations_resolves_parent_agent_id_children_vi
                     last_event_sequence: None,
                     pinned: false,
                     compaction_state_json: None,
+                    use_warp_credits_instead_of_chatgpt: false,
                 },
                 now - chrono::Duration::seconds(1),
                 Some("Parent query"),
@@ -881,6 +882,7 @@ fn test_initialize_historical_conversations_uses_root_task_description_title() {
                     last_event_sequence: None,
                     pinned: false,
                     compaction_state_json: None,
+                    use_warp_credits_instead_of_chatgpt: false,
                 })
                 .expect("conversation data should serialize"),
                 last_modified_at: now,
@@ -1048,6 +1050,7 @@ fn test_initialize_historical_conversations_eagerly_hydrates_orchestration_child
                     last_event_sequence: None,
                     pinned: false,
                     compaction_state_json: None,
+                    use_warp_credits_instead_of_chatgpt: false,
                 },
                 now,
                 // Child needs at least one root task so `AIConversation::new_restored` succeeds.
@@ -1072,6 +1075,7 @@ fn test_initialize_historical_conversations_eagerly_hydrates_orchestration_child
                     last_event_sequence: None,
                     pinned: false,
                     compaction_state_json: None,
+                    use_warp_credits_instead_of_chatgpt: false,
                 },
                 now - chrono::Duration::seconds(1),
                 Some("Parent query"),
@@ -1165,7 +1169,7 @@ fn prompt_history_candidates_seeds_from_snapshot_then_appends_session_prompts() 
                 .clone();
             let request_input = RequestInput {
                 conversation_id,
-                input_messages: std::collections::HashMap::from([(task_id, exchange.input)]),
+                input_messages: Vec::from([(task_id, exchange.input)]),
                 working_directory: exchange.working_directory,
                 model_id: exchange.model_id,
                 coding_model_id: exchange.coding_model_id,
@@ -1262,7 +1266,7 @@ fn test_ai_queries_for_terminal_view_up_arrow_history() {
                 .clone();
             let request_input = RequestInput {
                 conversation_id,
-                input_messages: std::collections::HashMap::from([(task_id, exchange.input)]),
+                input_messages: Vec::from([(task_id, exchange.input)]),
                 working_directory: exchange.working_directory,
                 model_id: exchange.model_id,
                 coding_model_id: exchange.coding_model_id,
@@ -1308,7 +1312,7 @@ fn test_ai_queries_for_terminal_view_up_arrow_history() {
                 .clone();
             let request_input = RequestInput {
                 conversation_id,
-                input_messages: std::collections::HashMap::from([(task_id, exchange.input)]),
+                input_messages: Vec::from([(task_id, exchange.input)]),
                 working_directory: exchange.working_directory,
                 model_id: exchange.model_id,
                 coding_model_id: exchange.coding_model_id,
@@ -1368,7 +1372,7 @@ fn test_ai_queries_for_terminal_view_up_arrow_history() {
                 .clone();
             let request_input = RequestInput {
                 conversation_id,
-                input_messages: std::collections::HashMap::from([(task_id, exchange.input)]),
+                input_messages: Vec::from([(task_id, exchange.input)]),
                 working_directory: exchange.working_directory,
                 model_id: exchange.model_id,
                 coding_model_id: exchange.coding_model_id,
@@ -1439,7 +1443,7 @@ fn create_server_metadata(
         context_window_usage: 0.0,
         credits_spent,
         platform_credits_spent: 0.0,
-        total_provider_cost_in_cents: None,
+        total_billed_cost_in_cents: None,
         credits_spent_for_last_block: None,
         charged_usage_for_last_block: None,
         total_charged_usage: None,
@@ -1822,7 +1826,7 @@ fn test_transcript_viewer_terminal_view_is_not_marked_historical() {
 
             let request_input = RequestInput {
                 conversation_id,
-                input_messages: std::collections::HashMap::from([(task_id, exchange.input)]),
+                input_messages: Vec::from([(task_id, exchange.input)]),
                 working_directory: exchange.working_directory,
                 model_id: exchange.model_id,
                 coding_model_id: exchange.coding_model_id,
@@ -2374,7 +2378,7 @@ fn test_all_cleared_conversations_includes_terminal_view_id() {
 
             let request_input = RequestInput {
                 conversation_id,
-                input_messages: std::collections::HashMap::from([(task_id, exchange.input)]),
+                input_messages: Vec::from([(task_id, exchange.input)]),
                 working_directory: exchange.working_directory,
                 model_id: exchange.model_id,
                 coding_model_id: exchange.coding_model_id,
@@ -2924,7 +2928,7 @@ fn test_truncate_from_exchange_to_empty_persist_event_has_empty_updated_tasks() 
             let exchange = create_exchange_with_query("truncate me", now, None);
             let request_input = RequestInput {
                 conversation_id,
-                input_messages: std::collections::HashMap::from([(
+                input_messages: Vec::from([(
                     crate::ai::agent::task::TaskId::new(server_root_id.clone()),
                     exchange.input,
                 )]),
@@ -3152,14 +3156,25 @@ fn test_initialize_output_for_response_stream_persists_updated_conversation_stat
         let stream_id = ResponseStreamId::new_for_test();
         history_model.update(&mut app, |history_model, ctx| {
             let exchange = create_exchange_with_query("query", now, None);
-            let task_id = history_model
-                .conversation(&conversation_id)
-                .expect("conversation should exist")
-                .get_root_task_id()
-                .clone();
+            let conversation = history_model
+                .conversation_mut(&conversation_id)
+                .expect("conversation should exist");
+            let task_id = conversation.get_root_task_id().clone();
+            let subtask_id = conversation.create_optimistic_cli_subagent_task_for_test(
+                &BlockId::from("stream-init-block".to_string()),
+            );
             let request_input = RequestInput {
                 conversation_id,
-                input_messages: std::collections::HashMap::from([(task_id, exchange.input)]),
+                input_messages: vec![
+                    (task_id.clone(), exchange.input),
+                    (
+                        subtask_id.clone(),
+                        vec![AIAgentInput::ResumeConversation {
+                            context: Default::default(),
+                        }],
+                    ),
+                    (task_id.clone(), vec![AIAgentInput::AgentWake]),
+                ],
                 working_directory: exchange.working_directory,
                 model_id: exchange.model_id,
                 coding_model_id: exchange.coding_model_id,
@@ -3169,6 +3184,14 @@ fn test_initialize_output_for_response_stream_persists_updated_conversation_stat
                 request_start_ts: exchange.start_time,
                 supported_tools_override: None,
             };
+            assert!(matches!(
+                request_input.all_inputs().collect::<Vec<_>>().as_slice(),
+                [
+                    AIAgentInput::UserQuery { .. },
+                    AIAgentInput::ResumeConversation { .. },
+                    AIAgentInput::AgentWake,
+                ]
+            ));
             history_model
                 .update_conversation_for_new_request_input(
                     request_input,
@@ -3177,6 +3200,23 @@ fn test_initialize_output_for_response_stream_persists_updated_conversation_stat
                     ctx,
                 )
                 .unwrap();
+            let conversation = history_model.conversation(&conversation_id).unwrap();
+            let root_exchanges = conversation
+                .get_task(&task_id)
+                .unwrap()
+                .exchanges()
+                .collect_vec();
+            let subtask_exchanges = conversation
+                .get_task(&subtask_id)
+                .unwrap()
+                .exchanges()
+                .collect_vec();
+            assert_eq!(root_exchanges.len(), 1);
+            assert_eq!(subtask_exchanges.len(), 1);
+            assert!(matches!(
+                root_exchanges[0].input.as_slice(),
+                [AIAgentInput::UserQuery { .. }, AIAgentInput::AgentWake]
+            ));
         });
 
         let server_token = "stream-init-token".to_string();
@@ -3192,6 +3232,15 @@ fn test_initialize_output_for_response_stream_persists_updated_conversation_stat
                     run_id: run_id.clone(),
                 },
                 ctx,
+            );
+            let conversation = history_model.conversation(&conversation_id).unwrap();
+            assert_eq!(
+                conversation
+                    .all_tasks()
+                    .flat_map(|task| task.exchanges())
+                    .filter(|exchange| exchange.output_status.output().is_some())
+                    .count(),
+                2,
             );
         });
 
@@ -3425,7 +3474,7 @@ fn test_find_by_token_after_initialize_output_for_response_stream() {
                 .clone();
             let request_input = RequestInput {
                 conversation_id,
-                input_messages: std::collections::HashMap::from([(task_id, exchange.input)]),
+                input_messages: Vec::from([(task_id, exchange.input)]),
                 working_directory: exchange.working_directory,
                 model_id: exchange.model_id,
                 coding_model_id: exchange.coding_model_id,
@@ -3535,6 +3584,7 @@ fn test_find_by_token_after_insert_forked_conversation_from_tasks() {
             last_event_sequence: None,
             pinned: false,
             compaction_state_json: None,
+            use_warp_credits_instead_of_chatgpt: false,
         };
         let tasks = vec![warp_multi_agent_api::Task {
             id: "root-task".to_string(),
@@ -3593,7 +3643,7 @@ fn test_find_by_token_after_mark_conversations_historical_for_terminal_surface()
                 .clone();
             let request_input = RequestInput {
                 conversation_id,
-                input_messages: std::collections::HashMap::from([(task_id, exchange.input)]),
+                input_messages: Vec::from([(task_id, exchange.input)]),
                 working_directory: exchange.working_directory,
                 model_id: exchange.model_id,
                 coding_model_id: exchange.coding_model_id,
@@ -3753,6 +3803,7 @@ fn test_fork_then_bind_handoff_token_resolves_to_forked_conversation() {
                 last_event_sequence: None,
                 pinned: false,
                 compaction_state_json: None,
+                use_warp_credits_instead_of_chatgpt: false,
             }),
         )
         .expect("restored source conversation should build");
@@ -3842,6 +3893,7 @@ fn test_fork_then_bind_handoff_token_persists_to_restored_conversation() {
                 last_event_sequence: None,
                 pinned: false,
                 compaction_state_json: None,
+                use_warp_credits_instead_of_chatgpt: false,
             }),
         )
         .expect("restored source conversation should build");
@@ -3956,6 +4008,7 @@ fn test_fork_then_bind_handoff_token_updates_cached_metadata_and_emits_refresh_e
                 last_event_sequence: None,
                 pinned: false,
                 compaction_state_json: None,
+                use_warp_credits_instead_of_chatgpt: false,
             }),
         )
         .expect("restored source conversation should build");
@@ -4086,6 +4139,7 @@ fn test_fork_conversation_preserves_task_ids_when_requested() {
                 last_event_sequence: None,
                 pinned: false,
                 compaction_state_json: None,
+                use_warp_credits_instead_of_chatgpt: false,
             }),
         )
         .expect("restored source conversation should build");
@@ -4238,6 +4292,7 @@ fn test_fork_conversation_title_override_replaces_prefix() {
                 last_event_sequence: None,
                 pinned: false,
                 compaction_state_json: None,
+                use_warp_credits_instead_of_chatgpt: false,
             }),
         )
         .expect("restored source conversation should build");
@@ -4329,6 +4384,7 @@ fn hydrate_remote_child_placeholder_with_cloud_transcript_preserves_placeholder_
                 last_event_sequence: None,
                 pinned: false,
                 compaction_state_json: None,
+                use_warp_credits_instead_of_chatgpt: false,
             }),
         )
         .expect("placeholder conversation should build");
@@ -4376,6 +4432,7 @@ fn hydrate_remote_child_placeholder_with_cloud_transcript_preserves_placeholder_
                 last_event_sequence: None,
                 pinned: false,
                 compaction_state_json: None,
+                use_warp_credits_instead_of_chatgpt: false,
             }),
         )
         .expect("cloud conversation should build");
@@ -4556,7 +4613,7 @@ fn statuses_after_stream_error(
                 .clone();
             let request_input = RequestInput {
                 conversation_id,
-                input_messages: HashMap::from([(task_id, exchange.input)]),
+                input_messages: Vec::from([(task_id, exchange.input)]),
                 working_directory: exchange.working_directory,
                 model_id: exchange.model_id,
                 coding_model_id: exchange.coding_model_id,
@@ -5173,6 +5230,7 @@ fn straddle_rewind_followup_requests_are_clean_and_durable() {
                 last_event_sequence: None,
                 pinned: false,
                 compaction_state_json: None,
+                use_warp_credits_instead_of_chatgpt: false,
             }),
         )
         .expect("conversation should build");
@@ -5257,7 +5315,7 @@ fn straddle_rewind_followup_requests_are_clean_and_durable() {
             let exchange = create_exchange_with_query("follow up B", Local::now(), None);
             let request_input = RequestInput {
                 conversation_id,
-                input_messages: HashMap::from([(
+                input_messages: Vec::from([(
                     TaskId::new(root_task_id.to_string()),
                     exchange.input,
                 )]),

@@ -1,4 +1,5 @@
 pub mod ai_agent_tasks;
+pub mod billing_unit;
 #[cfg(test)]
 pub mod byop;
 pub mod settings;

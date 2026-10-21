@@ -222,7 +222,6 @@ enum RecoveryOutcome {
     Surfaced,
 }
 
-
 /// Builds the direct-inference input when `params.model` is a user-configured BYOP model.
 /// For any other model the cancellation receiver is handed back so the request can go
 /// through Warp's multi-agent API instead.
@@ -266,8 +265,7 @@ fn pending_title_generation(
     let title_model_id = llm_preferences.get_active_title_model(ctx, None).id.clone();
     let (provider, api_key, model_id) =
         crate::ai::agent_providers::lookup_byop(ctx, &title_model_id)?;
-    let reasoning_effort =
-        llm_preferences.get_reasoning_effort(None, provider.api_type, &model_id);
+    let reasoning_effort = llm_preferences.get_reasoning_effort(None, provider.api_type, &model_id);
     Some(PendingTitleGeneration {
         input: crate::ai::agent_providers::chat_stream::TitleGenInput {
             base_url: provider.base_url,
@@ -305,11 +303,14 @@ fn without_byop_model_ids(
     }
 
     let models = UserWorkspaces::as_ref(ctx).feature_model_choice_for_team_uid(None);
-    let mut replace = |id: &mut crate::ai::llms::LLMId, fallback: Option<&crate::ai::llms::LLMId>| {
+    let mut replace = |id: &mut crate::ai::llms::LLMId,
+                       fallback: Option<&crate::ai::llms::LLMId>| {
         if preferences.byop_llm_info_for_id(id).is_some()
             && let Some(fallback) = fallback
         {
-            log::debug!("[byop] replacing provider model {id:?} with {fallback:?} for a Warp request");
+            log::debug!(
+                "[byop] replacing provider model {id:?} with {fallback:?} for a Warp request"
+            );
             *id = fallback.clone();
         }
     };

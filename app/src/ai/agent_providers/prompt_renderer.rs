@@ -307,9 +307,7 @@ fn collect_prompt_context(model_id: &str, ctx: &[AIAgentContext]) -> PromptConte
             AIAgentContext::Skills { skills } => {
                 for s in skills {
                     let path = match &s.reference {
-                        ai::skills::SkillReference::Path(p) => {
-                            Some(p.display_path())
-                        }
+                        ai::skills::SkillReference::Path(p) => Some(p.display_path()),
                         // Bundled skills load via InvokeSkill, not read_skill.
                         // Omit skill_path to avoid guiding the model toward a
                         // value that will always fail BYOP's skill_by_reference.
@@ -629,14 +627,15 @@ mod tests {
     /// 而非仅 name/description,否则模型无法正确调用 read_skill 工具。
     #[test]
     fn render_includes_skill_path_for_read_skill_tool() {
-        use crate::ai::skills::SkillDescriptor;
         use ai::skills::{SkillProvider, SkillReference, SkillScope};
+
+        use crate::ai::skills::SkillDescriptor;
 
         let skill_path = "/home/user/.agents/skills/open-browser-use/SKILL.md";
         let skill = SkillDescriptor {
-            reference: SkillReference::Path(warp_util::local_or_remote_path::LocalOrRemotePath::Local(
-                skill_path.into(),
-            )),
+            reference: SkillReference::Path(
+                warp_util::local_or_remote_path::LocalOrRemotePath::Local(skill_path.into()),
+            ),
             name: "open-browser-use".into(),
             description: "Automates Chrome browser operations.".into(),
             scope: SkillScope::Project,
@@ -665,9 +664,10 @@ mod tests {
     /// 以避免模型使用必然失败的 @warp-skill:{id} 值。
     #[test]
     fn render_omits_skill_path_for_bundled_skill() {
-        use crate::ai::skills::SkillDescriptor;
         use ai::skills::{SkillProvider, SkillReference, SkillScope};
         use warp_core::ui::icons::Icon;
+
+        use crate::ai::skills::SkillDescriptor;
 
         let skill = SkillDescriptor {
             reference: SkillReference::BundledSkillId("find-skills".into()),

@@ -91,6 +91,7 @@ pub fn convert_conversation_data_to_ai_conversation(
             last_event_sequence: None,
             pinned: false,
             compaction_state_json: None,
+            use_warp_credits_instead_of_chatgpt: false,
         },
         RestorationMode::Continue => AgentConversationData {
             server_conversation_token: Some(
@@ -113,6 +114,7 @@ pub fn convert_conversation_data_to_ai_conversation(
             last_event_sequence: None,
             pinned: false,
             compaction_state_json: None,
+            use_warp_credits_instead_of_chatgpt: false,
         },
     };
 
@@ -613,6 +615,12 @@ pub(crate) fn convert_tool_call_result_to_input(
                     is_alt_screen_active: snapshot.is_alt_screen_active,
                     activity: snapshot.activity.as_ref().map(Into::into),
                 },
+                Some(api::run_shell_command_result::Result::TerminalBusy(busy)) => {
+                    RequestCommandOutputResult::TerminalBusy {
+                        command: result.command.clone(),
+                        block_id: busy.running_command_id.clone().into(),
+                    }
+                }
                 Some(api::run_shell_command_result::Result::PermissionDenied(
                     api::PermissionDenied { .. },
                 ))

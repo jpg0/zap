@@ -14,13 +14,14 @@
 //! 没有 BYOP 配置(`active_ai_model` 解码失败)→ `dispatch::*` 返回 `None`,
 //! 调用方静默 no-op(Zap 已剥云,不再 fallback ServerApi)。
 
-use minijinja::{context, Environment};
-use serde::Serialize;
 use std::sync::OnceLock;
 
+use minijinja::{Environment, context};
+use serde::Serialize;
+
 use super::oneshot::{
-    byop_oneshot_completion, resolve_active_ai_oneshot, resolve_next_command_oneshot,
-    OneshotConfig, OneshotOptions,
+    OneshotConfig, OneshotOptions, byop_oneshot_completion, resolve_active_ai_oneshot,
+    resolve_next_command_oneshot,
 };
 use crate::ai::predict::generate_am_query_suggestions::GenerateAMQuerySuggestionsResponse;
 
@@ -134,8 +135,9 @@ pub struct RenderedRequest {
 // ---------------------------------------------------------------------------
 
 pub mod prompt_suggestions {
-    use super::*;
     use warpui::{AppContext, EntityId, SingletonEntity};
+
+    use super::*;
 
     pub struct Input {
         pub recent_blocks: Vec<BlockSnippet>,
@@ -151,7 +153,10 @@ pub mod prompt_suggestions {
     ) -> Option<RenderedRequest> {
         let cfg = resolve_active_ai_oneshot(app, terminal_view_id)?;
         let language = "English";
-        let system = render("prompt_suggestions_system.j2", context! { language => language });
+        let system = render(
+            "prompt_suggestions_system.j2",
+            context! { language => language },
+        );
         let user = render(
             "prompt_suggestions_user.j2",
             context! {
@@ -194,8 +199,9 @@ pub mod prompt_suggestions {
 // ---------------------------------------------------------------------------
 
 pub mod nld_predict {
-    use super::*;
     use warpui::{AppContext, EntityId};
+
+    use super::*;
 
     pub struct Input {
         pub partial_query: String,
@@ -247,8 +253,9 @@ pub mod nld_predict {
 // ---------------------------------------------------------------------------
 
 pub mod relevant_files {
-    use super::*;
     use warpui::{AppContext, EntityId};
+
+    use super::*;
 
     #[derive(Debug, Clone, Serialize)]
     pub struct FileEntry {
@@ -320,10 +327,10 @@ pub mod relevant_files {
 // ---------------------------------------------------------------------------
 
 pub mod workflow_metadata {
-    use super::*;
+    pub use parsing::WorkflowMetadataDto;
     use warpui::{AppContext, EntityId};
 
-    pub use parsing::WorkflowMetadataDto;
+    use super::*;
 
     pub struct Input {
         pub command: String,
@@ -377,8 +384,9 @@ pub mod workflow_metadata {
 // ---------------------------------------------------------------------------
 
 pub mod next_command {
-    use super::*;
     use warpui::{AppContext, EntityId};
+
+    use super::*;
 
     #[derive(Debug, Serialize)]
     struct UserRuleCtx {
@@ -412,9 +420,12 @@ pub mod next_command {
             .into_iter()
             .map(|(name, content)| UserRuleCtx { name, content })
             .collect();
-        let system = render("next_command_system.j2", context! {
-            user_rules => user_rule_ctxs,
-        });
+        let system = render(
+            "next_command_system.j2",
+            context! {
+                user_rules => user_rule_ctxs,
+            },
+        );
         let user = render(
             "next_command_user.j2",
             context! {

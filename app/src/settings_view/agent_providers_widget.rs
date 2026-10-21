@@ -26,28 +26,25 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use settings::Setting;
+use strum::IntoEnumIterator;
 use warpui::elements::{
     ChildView, Container, CornerRadius, CrossAxisAlignment, Expanded, Flex, MainAxisAlignment,
     MouseStateHandle, ParentElement, Radius, Text, Wrap,
 };
-use warpui::ui_components::{
-    button::ButtonVariant,
-    components::{Coords, UiComponent, UiComponentStyles},
-};
+use warpui::ui_components::button::ButtonVariant;
+use warpui::ui_components::components::{Coords, UiComponent, UiComponentStyles};
 use warpui::{AppContext, Element, SingletonEntity, ViewContext, ViewHandle};
 
+use super::agent_providers_page::{
+    AgentProvidersPageAction, AgentProvidersPageView, ModelCapabilityKind,
+};
+use super::settings_page::{HEADER_PADDING, SettingsWidget, build_sub_header};
 use crate::ai::agent_providers::AgentProviderSecrets;
 use crate::appearance::Appearance;
 use crate::editor::{
     EditorView, Event as EditorEvent, SingleLineEditorOptions, TextColors, TextOptions,
 };
 use crate::settings::{AISettings, AgentProvider, AgentProviderApiType, AgentProviderModel};
-use strum::IntoEnumIterator;
-
-use super::agent_providers_page::{
-    AgentProvidersPageAction, AgentProvidersPageView, ModelCapabilityKind,
-};
-use super::settings_page::{build_sub_header, SettingsWidget, HEADER_PADDING};
 
 const CARD_BUTTON_PADDING: f32 = 6.0;
 const FIELD_LABEL_MARGIN_TOP: f32 = 6.0;
@@ -295,10 +292,7 @@ impl AgentProvidersWidget {
             let appearance = Appearance::handle(ctx).as_ref(ctx);
             let options = single_line_editor_options(appearance, false);
             let mut editor = EditorView::single_line(options, ctx);
-            editor.set_placeholder_text(
-                String::from("Search providers…"),
-                ctx,
-            );
+            editor.set_placeholder_text(String::from("Search providers…"), ctx);
             if !initial_query.is_empty() {
                 editor.set_buffer_text(&initial_query, ctx);
             }
@@ -307,9 +301,9 @@ impl AgentProvidersWidget {
         ctx.subscribe_to_view(&search_editor, move |_, editor, event, ctx| {
             if matches!(event, EditorEvent::Edited(_)) {
                 let buffer_text = editor.as_ref(ctx).buffer_text(ctx);
-                ctx.dispatch_typed_action_deferred(AgentProvidersPageAction::SetModelsDevSearchQuery(
-                    buffer_text,
-                ));
+                ctx.dispatch_typed_action_deferred(
+                    AgentProvidersPageAction::SetModelsDevSearchQuery(buffer_text),
+                );
             }
         });
 
@@ -334,10 +328,7 @@ impl AgentProvidersWidget {
             let appearance = Appearance::handle(ctx).as_ref(ctx);
             let options = single_line_editor_options(appearance, false);
             let mut editor = EditorView::single_line(options, ctx);
-            editor.set_placeholder_text(
-                String::from("Display name (e.g. DS-V3 General)"),
-                ctx,
-            );
+            editor.set_placeholder_text(String::from("Display name (e.g. DS-V3 General)"), ctx);
             if !initial_name.is_empty() {
                 editor.set_buffer_text(&initial_name, ctx);
             }
@@ -377,10 +368,7 @@ impl AgentProvidersWidget {
             let appearance = Appearance::handle(ctx).as_ref(ctx);
             let options = single_line_editor_options(appearance, false);
             let mut editor = EditorView::single_line(options, ctx);
-            editor.set_placeholder_text(
-                String::from("Context (tokens)"),
-                ctx,
-            );
+            editor.set_placeholder_text(String::from("Context (tokens)"), ctx);
             if !initial_context.is_empty() {
                 editor.set_buffer_text(&initial_context, ctx);
             }
@@ -400,10 +388,7 @@ impl AgentProvidersWidget {
             let appearance = Appearance::handle(ctx).as_ref(ctx);
             let options = single_line_editor_options(appearance, false);
             let mut editor = EditorView::single_line(options, ctx);
-            editor.set_placeholder_text(
-                String::from("Output (tokens)"),
-                ctx,
-            );
+            editor.set_placeholder_text(String::from("Output (tokens)"), ctx);
             if !initial_output.is_empty() {
                 editor.set_buffer_text(&initial_output, ctx);
             }
@@ -488,8 +473,10 @@ impl AgentProvidersWidget {
             let appearance = Appearance::handle(ctx).as_ref(ctx);
             let options = single_line_editor_options(appearance, false);
             let mut editor = EditorView::single_line(options, ctx);
-            editor
-                .set_placeholder_text(String::from("Custom provider name (e.g. DeepSeek, local Ollama)"), ctx);
+            editor.set_placeholder_text(
+                String::from("Custom provider name (e.g. DeepSeek, local Ollama)"),
+                ctx,
+            );
             if !initial_name.is_empty() {
                 editor.set_buffer_text(&initial_name, ctx);
             }
@@ -506,10 +493,7 @@ impl AgentProvidersWidget {
             let appearance = Appearance::handle(ctx).as_ref(ctx);
             let options = single_line_editor_options(appearance, false);
             let mut editor = EditorView::single_line(options, ctx);
-            editor.set_placeholder_text(
-                String::from("https://api.deepseek.com/v1"),
-                ctx,
-            );
+            editor.set_placeholder_text(String::from("https://api.deepseek.com/v1"), ctx);
             if !initial_base_url.is_empty() {
                 editor.set_buffer_text(&initial_base_url, ctx);
             }
@@ -965,7 +949,10 @@ impl AgentProvidersWidget {
             None => {
                 return Container::new(
                     Text::new(
-                        format!("(no editors bound for this provider yet: {id})", id = provider.id.as_str()),
+                        format!(
+                            "(no editors bound for this provider yet: {id})",
+                            id = provider.id.as_str()
+                        ),
                         appearance.ui_font_family(),
                         appearance.ui_font_size(),
                     )
@@ -1126,22 +1113,10 @@ impl AgentProvidersWidget {
             let header = Container::new(
                 Flex::row()
                     .with_cross_axis_alignment(CrossAxisAlignment::Center)
-                    .with_child(header_cell(
-                        2.,
-                        &String::from("Display name"),
-                    ))
-                    .with_child(header_cell(
-                        2.,
-                        &String::from("Model ID"),
-                    ))
-                    .with_child(header_cell(
-                        1.,
-                        &String::from("Context (tok)"),
-                    ))
-                    .with_child(header_cell(
-                        1.,
-                        &String::from("Output (tok)"),
-                    ))
+                    .with_child(header_cell(2., &String::from("Display name")))
+                    .with_child(header_cell(2., &String::from("Model ID")))
+                    .with_child(header_cell(1., &String::from("Context (tok)")))
+                    .with_child(header_cell(1., &String::from("Output (tok)")))
                     // 占位,与下方展开/删除两个按钮对齐。
                     .with_child(
                         Flex::row()
@@ -1456,9 +1431,13 @@ impl AgentProvidersWidget {
         match models_dev::cached() {
             None => {
                 let catalog_text = if models_dev::last_fetch_failed() {
-                    String::from("Failed to load models.dev catalog. Click [Refresh catalog] to retry.")
+                    String::from(
+                        "Failed to load models.dev catalog. Click [Refresh catalog] to retry.",
+                    )
                 } else {
-                    String::from("Loading models.dev catalog… (the first load may take a few seconds)")
+                    String::from(
+                        "Loading models.dev catalog… (the first load may take a few seconds)",
+                    )
                 };
                 body.add_child(
                     Container::new(
@@ -1478,7 +1457,9 @@ impl AgentProvidersWidget {
                 body.add_child(
                     Container::new(
                         Text::new(
-                            String::from("models.dev catalog is empty. Click [Refresh catalog] to retry."),
+                            String::from(
+                                "models.dev catalog is empty. Click [Refresh catalog] to retry.",
+                            ),
                             appearance.ui_font_family(),
                             appearance.ui_font_size(),
                         )
@@ -1627,7 +1608,9 @@ impl SettingsWidget for AgentProvidersWidget {
         .with_padding_bottom(HEADER_PADDING)
         .finish();
 
-        let description_text = String::from("Configure custom Agent providers across multiple protocols — OpenAI-compatible (DeepSeek, Zhipu GLM, Moonshot, DashScope, SiliconFlow, OpenRouter, etc.), Anthropic, Gemini, and local Ollama. You can add models manually (display name + model ID mapping) or fetch them automatically from the API. Provider metadata is stored in the local settings.toml; API keys are stored securely in the system keychain.");
+        let description_text = String::from(
+            "Configure custom Agent providers across multiple protocols — OpenAI-compatible (DeepSeek, Zhipu GLM, Moonshot, DashScope, SiliconFlow, OpenRouter, etc.), Anthropic, Gemini, and local Ollama. You can add models manually (display name + model ID mapping) or fetch them automatically from the API. Provider metadata is stored in the local settings.toml; API keys are stored securely in the system keychain.",
+        );
         let description = Container::new(
             Text::new(
                 description_text,

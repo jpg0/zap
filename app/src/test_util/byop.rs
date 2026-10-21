@@ -2,6 +2,7 @@
 
 use warpui::App;
 
+use crate::LaunchMode;
 use crate::ai::agent_providers::AgentProviderSecrets;
 use crate::ai::execution_profiles::profiles::AIExecutionProfilesModel;
 use crate::ai::llms::LLMPreferences;
@@ -17,7 +18,6 @@ use crate::settings::{AgentProvider, AgentProviderApiType, AgentProviderModel};
 use crate::test_util::settings::initialize_settings_for_tests;
 use crate::workspaces::team_tester::TeamTesterStatus;
 use crate::workspaces::user_workspaces::UserWorkspaces;
-use crate::LaunchMode;
 
 /// Registers everything a provider-backed conversation touches, so a test can configure a
 /// provider and resolve models against it.

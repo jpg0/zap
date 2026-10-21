@@ -7,13 +7,13 @@
 //! `rmcp::model::Tool` and `rmcp::model::Resource` come from the rmcp crate; only their
 //! public constructors are used here.
 
-use rmcp::model::{Resource, Tool};
-use serde_json::json;
 use std::sync::Arc;
 
-use crate::ai::agent::{MCPContext, MCPServer};
+use rmcp::model::{Resource, Tool};
+use serde_json::json;
 
 use super::{build_mcp_tool_defs, function_name};
+use crate::ai::agent::{MCPContext, MCPServer};
 
 /// 构造一个 `rmcp::model::Tool`,带最小输入 schema。
 fn mk_tool(name: &'static str, desc: &'static str) -> Tool {

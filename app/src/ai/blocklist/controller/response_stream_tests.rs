@@ -324,16 +324,15 @@ fn geap_refresh_does_not_add_credentials_to_a_keyless_request() {
 /// fields, so they are replaced before the request is sent.
 #[test]
 fn provider_model_ids_are_replaced_for_warp_requests() {
+    use settings::Setting as _;
+    use warpui::{App, SingletonEntity};
+
+    use super::without_byop_model_ids;
     use crate::ai::agent::api::RequestParams;
     use crate::ai::agent_providers::llm_id;
     use crate::ai::llms::LLMPreferences;
     use crate::settings::AISettings;
     use crate::test_util::byop::{init_byop_test_app, sample_provider};
-    use warpui::{App, SingletonEntity};
-
-    use settings::Setting as _;
-
-    use super::without_byop_model_ids;
 
     App::test((), |mut app| async move {
         init_byop_test_app(&mut app);

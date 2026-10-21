@@ -15,6 +15,8 @@ pub use convert_from::{
     ConversionParams, ConvertAPIMessageToClientOutputMessage, MaybeAIAgentOutputMessage,
     MessageToAIAgentOutputMessageError, user_inputs_from_messages,
 };
+#[cfg_attr(target_family = "wasm", allow(unused_imports))]
+pub(crate) use convert_to::serde_json_to_prost;
 use futures_lite::Stream;
 pub use r#impl::generate_multi_agent_output;
 use mcp::TemplatableMCPServerInfo;
@@ -36,10 +38,10 @@ use crate::ai::execution_profiles::AIExecutionProfileAppExt;
 use crate::ai::execution_profiles::profiles::AIExecutionProfilesModel;
 use crate::ai::facts::{AIFact, CloudAIFactModel};
 use crate::ai::llms::{LLMId, LLMPreferences};
-use crate::cloud_object::model::generic_string_model::GenericStringObjectId;
-use crate::cloud_object::CloudObject as _;
-use crate::cloud_object::model::persistence::CloudModel;
 use crate::ai::mcp::TemplatableMCPServerManager;
+use crate::cloud_object::CloudObject as _;
+use crate::cloud_object::model::generic_string_model::GenericStringObjectId;
+use crate::cloud_object::model::persistence::CloudModel;
 use crate::send_telemetry_from_app_ctx;
 use crate::server::server_api::AIApiError;
 use crate::server::telemetry::TelemetryEvent;
@@ -176,6 +178,9 @@ pub struct RequestParams {
     /// registry. `None` when no custom router is selected.
     pub custom_model_routers: Option<warp_multi_agent_api::request::settings::CustomModelRouters>,
     pub allow_use_of_warp_credits: bool,
+    /// Asks the server not to attach the user's delegated ChatGPT token, so OpenAI requests run
+    /// on Warp's key. Set for the rest of a conversation after a token-sharing failure.
+    pub skip_chatgpt_subscription: bool,
     pub autonomy_level: warp_multi_agent_api::AutonomyLevel,
     pub isolation_level: warp_multi_agent_api::IsolationLevel,
     pub web_search_enabled: bool,
@@ -241,6 +246,7 @@ pub struct ConversationData {
     pub forked_from_conversation_token: Option<ServerConversationToken>,
     pub ambient_agent_task_id: Option<AmbientAgentTaskId>,
     pub existing_suggestions: Option<Suggestions>,
+    pub use_warp_credits_instead_of_chatgpt: bool,
 }
 
 impl RequestParams {
@@ -270,6 +276,7 @@ impl RequestParams {
             custom_model_providers: None,
             custom_model_routers: None,
             allow_use_of_warp_credits: false,
+            skip_chatgpt_subscription: false,
             autonomy_level: Default::default(),
             isolation_level: Default::default(),
             web_search_enabled: false,
@@ -483,9 +490,8 @@ impl RequestParams {
         let byop_target_task_id = if request_input.input_messages.len() == 1 {
             request_input
                 .input_messages
-                .keys()
-                .next()
-                .map(ToString::to_string)
+                .first()
+                .map(|(task_id, _)| task_id.to_string())
         } else {
             None
         };
@@ -520,6 +526,7 @@ impl RequestParams {
             custom_model_providers,
             custom_model_routers,
             allow_use_of_warp_credits,
+            skip_chatgpt_subscription: conversation.use_warp_credits_instead_of_chatgpt,
             autonomy_level,
             isolation_level,
             web_search_enabled,

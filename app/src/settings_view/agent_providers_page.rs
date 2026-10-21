@@ -5,11 +5,11 @@ use settings::Setting as _;
 use warp_core::features::FeatureFlag;
 use warpui::{AppContext, Entity, SingletonEntity, TypedActionView, View, ViewContext, ViewHandle};
 
+use super::SettingsSection;
 use super::agent_providers_widget::AgentProvidersWidget;
 use super::settings_page::{
     MatchData, PageTitle, PageType, SettingsPageMeta, SettingsPageViewHandle, SettingsWidget,
 };
-use super::SettingsSection;
 use crate::settings::AISettings;
 
 const PAGE_TITLE: &str = "Agent providers";
@@ -607,11 +607,15 @@ impl TypedActionView for AgentProvidersPageView {
             } => {
                 use crate::ai::agent_providers::models_dev;
                 let Some(catalog) = models_dev::cached() else {
-                    log::warn!("[models.dev] catalog not loaded yet; cannot add {catalog_provider_id}");
+                    log::warn!(
+                        "[models.dev] catalog not loaded yet; cannot add {catalog_provider_id}"
+                    );
                     return;
                 };
                 let Some(cat_provider) = catalog.get(catalog_provider_id) else {
-                    log::warn!("[models.dev] no such provider id in the catalog: {catalog_provider_id}");
+                    log::warn!(
+                        "[models.dev] no such provider id in the catalog: {catalog_provider_id}"
+                    );
                     return;
                 };
                 let mut new_provider = crate::settings::AgentProvider::new_empty();

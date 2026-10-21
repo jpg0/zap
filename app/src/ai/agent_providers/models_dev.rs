@@ -19,8 +19,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::OnceLock;
-use std::sync::RwLock;
+use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, SystemTime};
 
 use http_client::Client;
@@ -238,8 +237,8 @@ pub async fn fetch_and_cache(client: Client) -> Result<(), String> {
         .await
         .map_err(|e| format!("Could not read the response body: {e}"))?;
 
-    let catalog: Catalog =
-        serde_json::from_slice(&bytes).map_err(|e| format!("Could not parse the JSON response: {e}"))?;
+    let catalog: Catalog = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("Could not parse the JSON response: {e}"))?;
 
     // 写盘 — 失败不算致命,只 log。
     let path = cache_path();

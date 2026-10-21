@@ -4,9 +4,10 @@ use ai::LLMId;
 use settings::Setting;
 use warpui::{App, SingletonEntity};
 
-use crate::ai::agent_providers::{llm_id, lookup_byop, AgentProviderSecrets};
-use crate::ai::llms::LLMPreferences;
+use crate::LaunchMode;
+use crate::ai::agent_providers::{AgentProviderSecrets, llm_id, lookup_byop};
 use crate::ai::execution_profiles::profiles::AIExecutionProfilesModel;
+use crate::ai::llms::LLMPreferences;
 use crate::ai::mcp::TemplatableMCPServerManager;
 use crate::auth::AuthStateProvider;
 use crate::auth::auth_manager::AuthManager;
@@ -15,13 +16,11 @@ use crate::network::NetworkStatus;
 use crate::server::cloud_objects::update_manager::UpdateManager;
 use crate::server::server_api::ServerApiProvider;
 use crate::server::sync_queue::SyncQueue;
-use crate::workspaces::team_tester::TeamTesterStatus;
-use crate::LaunchMode;
 use crate::settings::AISettings;
 use crate::test_util::byop::{init_byop_test_app, sample_provider};
 use crate::test_util::settings::initialize_settings_for_tests;
+use crate::workspaces::team_tester::TeamTesterStatus;
 use crate::workspaces::user_workspaces::{TeamlessScopeForTest, UserWorkspaces};
-
 
 fn byop_choice_ids(ctx: &warpui::AppContext) -> Vec<LLMId> {
     LLMPreferences::as_ref(ctx)
@@ -72,7 +71,10 @@ fn smoke_configured_byop_models_appear_in_picker() {
             let info = LLMPreferences::as_ref(ctx)
                 .custom_llm_info_for_id(&expected)
                 .expect("BYOP model should resolve by id");
-            assert!(info.disable_reason.is_none(), "valid provider should not be disabled");
+            assert!(
+                info.disable_reason.is_none(),
+                "valid provider should not be disabled"
+            );
         });
     });
 }

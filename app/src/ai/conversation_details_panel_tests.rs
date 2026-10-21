@@ -81,6 +81,7 @@ fn test_from_conversation_prefers_server_creator_profile() {
                 last_event_sequence: None,
                 pinned: false,
                 compaction_state_json: None,
+                use_warp_credits_instead_of_chatgpt: false,
             },
         );
         conversation.set_server_metadata(create_test_server_metadata(
@@ -131,9 +132,7 @@ fn create_message_with_directory(id: &str, task_id: &str, directory: &str) -> ap
             referenced_attachments: HashMap::new(),
             mode: None,
             intended_agent: Default::default(),
-            origin: None,
-            author: None,
-            source_message: None,
+            ..Default::default()
         })),
         request_id: "request-1".to_string(),
         timestamp: None,
@@ -193,7 +192,7 @@ fn create_test_server_metadata(
             context_window_usage: 0.0,
             credits_spent: 0.0,
             platform_credits_spent: 0.0,
-            total_provider_cost_in_cents: None,
+            total_billed_cost_in_cents: None,
             credits_spent_for_last_block: None,
             charged_usage_for_last_block: None,
             total_charged_usage: None,
@@ -251,6 +250,7 @@ fn test_from_task_includes_linked_directory_when_run_id_matches() {
                 last_event_sequence: None,
                 pinned: false,
                 compaction_state_json: None,
+                use_warp_credits_instead_of_chatgpt: false,
             },
         );
 
@@ -398,6 +398,7 @@ fn test_from_conversation_populates_local_conversation_fields() {
                 root_task_is_optimistic: None,
                 pinned: false,
                 compaction_state_json: None,
+                use_warp_credits_instead_of_chatgpt: false,
             },
         );
 
@@ -456,6 +457,22 @@ fn test_from_conversation_uses_charged_usage_dollar_total() {
             let data = ConversationDetailsData::from_conversation(&conversation, ctx);
 
             assert_eq!(data.cost_in_cents, Some(36.0));
+        });
+    });
+}
+
+/// Without streamed charges, the panel falls back to the server's cumulative billed snapshot;
+/// the provider cost is never used.
+#[test]
+fn test_from_conversation_falls_back_to_the_billed_snapshot() {
+    App::test((), |mut app| async move {
+        let mut conversation = AIConversation::new(false, false);
+        conversation.set_billed_cost_in_cents_for_test(Some(250.0));
+
+        app.update(|ctx| {
+            let data = ConversationDetailsData::from_conversation(&conversation, ctx);
+
+            assert_eq!(data.cost_in_cents, Some(250.0));
         });
     });
 }
@@ -556,6 +573,7 @@ fn test_from_task_includes_linked_directory_when_server_token_matches() {
                 last_event_sequence: None,
                 pinned: false,
                 compaction_state_json: None,
+                use_warp_credits_instead_of_chatgpt: false,
             },
         );
 
@@ -655,6 +673,7 @@ fn test_conversation_mode_carries_no_runner() {
                 last_event_sequence: None,
                 pinned: false,
                 compaction_state_json: None,
+                use_warp_credits_instead_of_chatgpt: false,
             },
         );
 

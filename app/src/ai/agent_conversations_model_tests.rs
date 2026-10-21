@@ -7,6 +7,7 @@ use instant::Instant;
 use parking_lot::Mutex;
 use persistence::model::{AgentConversationData, ChargedUsageTotals, ConversationUsageMetadata};
 use warp_cli::agent::Harness;
+use warp_core::execution_mode::{AppExecutionMode, ExecutionMode};
 use warp_core::features::FeatureFlag;
 use warpui::{App, EntityId, ModelHandle, SingletonEntity};
 
@@ -43,6 +44,7 @@ use crate::auth::AuthStateProvider;
 use crate::cloud_object::{Owner, Revision, ServerMetadata, ServerPermissions};
 use crate::server::ids::ServerId;
 use crate::server::server_api::presigned_upload::HttpStatusError;
+use crate::server::team_scope::RequestTeamScope;
 use crate::test_util::ai_agent_tasks::{create_api_task, create_message};
 use crate::test_util::settings::initialize_history_persistence_for_tests;
 use crate::workspace::{WorkspaceAction, WorkspaceRegistry};
@@ -247,6 +249,7 @@ fn test_title_update_refreshes_shadowing_task_title() {
                 last_event_sequence: None,
                 pinned: false,
                 compaction_state_json: None,
+                use_warp_credits_instead_of_chatgpt: false,
             },
         );
 
@@ -355,6 +358,7 @@ fn test_display_status_uses_matching_conversation_for_in_progress_task() {
                 last_event_sequence: None,
                 pinned: false,
                 compaction_state_json: None,
+                use_warp_credits_instead_of_chatgpt: false,
             },
         );
 
@@ -413,6 +417,7 @@ fn test_display_status_uses_active_execution_over_previous_conversation_status()
                 last_event_sequence: None,
                 pinned: false,
                 compaction_state_json: None,
+                use_warp_credits_instead_of_chatgpt: false,
             },
         );
 
@@ -478,6 +483,7 @@ fn test_display_status_updates_when_blocked_conversation_resumes() {
                 last_event_sequence: None,
                 pinned: false,
                 compaction_state_json: None,
+                use_warp_credits_instead_of_chatgpt: false,
             },
         );
 
@@ -559,6 +565,7 @@ fn test_display_status_terminal_task_state_overrides_matching_conversation() {
                 last_event_sequence: None,
                 pinned: false,
                 compaction_state_json: None,
+                use_warp_credits_instead_of_chatgpt: false,
             },
         );
 
@@ -615,6 +622,7 @@ fn test_status_filter_uses_display_status_for_task_backed_conversations() {
                 last_event_sequence: None,
                 pinned: false,
                 compaction_state_json: None,
+                use_warp_credits_instead_of_chatgpt: false,
             },
         );
 
@@ -747,6 +755,27 @@ fn create_test_model() -> AgentConversationsModel {
         rtc_task_refresh_throttle_state: RtcTaskRefreshThrottleState::default(),
         dirty_since: None,
     }
+}
+
+#[test]
+fn filter_fetch_skips_sdk_runs() {
+    App::test((), |mut app| async move {
+        app.add_singleton_model(|ctx| AppExecutionMode::new(ExecutionMode::Sdk, false, ctx));
+        let model = app.add_singleton_model(|_| create_test_model());
+
+        // No ServerApiProvider is installed, so trying to create a request would panic.
+        model.update(&mut app, |model, ctx| {
+            model.fetch_tasks_for_filters(
+                &AgentManagementFilters {
+                    owners: OwnerFilter::All,
+                    ..Default::default()
+                },
+                "user-a",
+                RequestTeamScope::from_scope(&TeamlessScopeForTest),
+                ctx,
+            );
+        });
+    });
 }
 
 #[test]
@@ -1002,7 +1031,7 @@ fn create_server_conversation_metadata(
             context_window_usage: 0.0,
             credits_spent: 0.0,
             platform_credits_spent: 0.0,
-            total_provider_cost_in_cents: None,
+            total_billed_cost_in_cents: None,
             credits_spent_for_last_block: None,
             charged_usage_for_last_block: None,
             total_charged_usage: None,
@@ -1273,6 +1302,7 @@ fn test_get_entries_excludes_conversation_shadowed_by_child_task() {
                 last_event_sequence: None,
                 pinned: false,
                 compaction_state_json: None,
+                use_warp_credits_instead_of_chatgpt: false,
             },
         );
         history_model.update(&mut app, |model, ctx| {
@@ -1426,6 +1456,7 @@ fn test_get_entries_merges_task_and_local_conversation_by_run_id() {
                 last_event_sequence: None,
                 pinned: false,
                 compaction_state_json: None,
+                use_warp_credits_instead_of_chatgpt: false,
             },
         );
 
@@ -1482,6 +1513,7 @@ fn test_get_entries_merges_task_and_local_conversation_by_server_token() {
                 last_event_sequence: None,
                 pinned: false,
                 compaction_state_json: None,
+                use_warp_credits_instead_of_chatgpt: false,
             },
         );
 
@@ -1778,6 +1810,7 @@ fn test_resolve_open_action_returns_none_for_active_unattachable_session() {
                 last_event_sequence: None,
                 pinned: false,
                 compaction_state_json: None,
+                use_warp_credits_instead_of_chatgpt: false,
             },
         );
 
@@ -2137,6 +2170,7 @@ fn test_server_token_assignment_updates_copy_link_resolution() {
                 last_event_sequence: None,
                 pinned: false,
                 compaction_state_json: None,
+                use_warp_credits_instead_of_chatgpt: false,
             },
         );
 
@@ -2300,6 +2334,7 @@ fn test_resolve_copy_link_uses_attached_synced_conversation_for_task_without_tok
                 last_event_sequence: None,
                 pinned: false,
                 compaction_state_json: None,
+                use_warp_credits_instead_of_chatgpt: false,
             },
         );
 
@@ -2681,6 +2716,7 @@ fn test_get_entries_prefers_task_when_task_id_matches_conversation_run_id() {
                 last_event_sequence: None,
                 pinned: false,
                 compaction_state_json: None,
+                use_warp_credits_instead_of_chatgpt: false,
             },
         );
 
@@ -2743,6 +2779,7 @@ fn test_get_entries_prefers_task_when_server_token_matches() {
                 last_event_sequence: None,
                 pinned: false,
                 compaction_state_json: None,
+                use_warp_credits_instead_of_chatgpt: false,
             },
         );
 

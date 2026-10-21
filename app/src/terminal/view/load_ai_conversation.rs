@@ -945,6 +945,7 @@ impl TerminalView {
             last_event_sequence: None,
             pinned: false,
             compaction_state_json: None,
+            use_warp_credits_instead_of_chatgpt: false,
         };
 
         // We already early-return for empty `tasks` above, so the strict

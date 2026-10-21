@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use ai::LLMProvider;
+use settings::Setting as _;
 use warpui::App;
 
 use super::*;
@@ -16,7 +17,6 @@ use crate::workspaces::workspace::{
     ByoApiKeyPolicy, MultiAdminPolicy, NativeWorkspacesPolicy, Workspace, WorkspaceMember,
     WorkspaceMemberUsageInfo, WorkspaceUid,
 };
-use settings::Setting as _;
 
 const TEST_EMAIL: &str = "member@example.com";
 const TEST_TEAM_UID: i64 = 42;
@@ -57,6 +57,8 @@ fn workspace_with_role(role: MembershipRole) -> Workspace {
             is_unlimited: false,
             request_limit: 0,
             requests_used_since_last_refresh: 0,
+            included_usage_cents: None,
+            usage_cents_used_since_last_refresh: None,
             is_request_limit_prorated: false,
         },
     }];
@@ -533,10 +535,12 @@ fn test_configured_provider_is_not_blocked_by_credit_denial() {
             PromptAlertState::RequestLimitReached,
             "without a provider, an out-of-credits denial still alerts"
         );
-        assert!(app.read(|ctx| PromptAlertView::does_alert_block_ai_requests(
-            &TeamlessScopeForTest,
-            ctx
-        )));
+        assert!(
+            app.read(|ctx| PromptAlertView::does_alert_block_ai_requests(
+                &TeamlessScopeForTest,
+                ctx
+            ))
+        );
 
         app.update(|ctx| {
             crate::settings::AISettings::handle(ctx).update(ctx, |settings, ctx| {
@@ -560,9 +564,11 @@ fn test_configured_provider_is_not_blocked_by_credit_denial() {
             PromptAlertState::NoAlert,
             "a configured provider does not depend on Warp credits"
         );
-        assert!(!app.read(|ctx| PromptAlertView::does_alert_block_ai_requests(
-            &TeamlessScopeForTest,
-            ctx
-        )));
+        assert!(
+            !app.read(|ctx| PromptAlertView::does_alert_block_ai_requests(
+                &TeamlessScopeForTest,
+                ctx
+            ))
+        );
     });
 }
