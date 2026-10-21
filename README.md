@@ -31,6 +31,18 @@
 
 [Warp](https://www.warp.dev) is an agentic development environment, born out of the terminal. Use Warp's built-in coding agent, or bring your own CLI agent (Claude Code, Codex, Gemini CLI, and others).
 
+## Bring your own model provider
+
+Configure your own OpenAI-, Anthropic-, Gemini-, or Ollama-compatible provider under
+**Settings → Agents → Agent providers**. Provider metadata (base URL, models, extra headers) is
+stored in `settings.toml`; API keys go to the OS keychain.
+
+Extra header values may contain `{conversationId}`, which is replaced at request time with the
+local ID of the agent conversation making the request. This is useful for gateways that keep one
+conversation on one backend. The placeholder is case-sensitive and applies to header values only;
+requests without a conversation (for example, prompt suggestions) omit that header instead of
+sending an empty value.
+
 ## Installation
 
 You can [download Warp](https://www.warp.dev/download) and [read our docs](https://docs.warp.dev/) for platform-specific instructions.

@@ -64,9 +64,11 @@ use warp_multi_agent_api as api;
 // 并把 warp 客户端已经收集好的 AIAgentContext(env / git / skills / project_rules / codebase / current_time)
 // 渲染进 system,让 BYOP 路径也能拥有跟 warp 自家路径相当的环境信息。
 use super::attachment_caps;
+use super::header_vars::HeaderVars;
 use super::openai_compatible::OpenAiCompatibleError;
 use super::{prompt_renderer, tools, user_context};
 use crate::ai::agent::api::{RequestParams, ResponseStream};
+use crate::ai::agent::conversation::AIConversationId;
 use crate::ai::agent::{
     AIAgentActionResult, AIAgentContext, AIAgentInput, RunningCommand, UserQueryMode,
 };
@@ -3244,6 +3246,8 @@ pub struct TitleGenInput {
     pub model_id: String,
     pub api_type: AgentProviderApiType,
     pub reasoning_effort: crate::settings::ReasoningEffortSetting,
+    pub extra_headers: Vec<(String, String)>,
+    pub conversation_id: Option<AIConversationId>,
 }
 
 pub struct ByopOutputInput {
@@ -3254,6 +3258,7 @@ pub struct ByopOutputInput {
     pub api_type: AgentProviderApiType,
     pub reasoning_effort: crate::settings::ReasoningEffortSetting,
     pub extra_headers: Vec<(String, String)>,
+    pub conversation_id: Option<AIConversationId>,
     pub task_id: String,
     pub target_task_id: String,
     pub needs_create_task: bool,
@@ -3281,6 +3286,7 @@ pub async fn generate_byop_output(
         api_type,
         reasoning_effort,
         extra_headers,
+        conversation_id,
         task_id,
         target_task_id,
         needs_create_task,
@@ -3312,21 +3318,25 @@ pub async fn generate_byop_output(
         shaping_api_type,
         attachment_caps,
     )?;
-    let conversation_id = params
+    let server_conversation_token = params
         .conversation_token
         .as_ref()
         .map(|t| t.as_str().to_string())
         .unwrap_or_default();
+    let extra_headers = super::header_vars::resolve_headers(
+        &extra_headers,
+        &HeaderVars::default().with_conversation_id(conversation_id),
+    );
     let chat_opts = build_chat_options(
         api_type,
         &base_url,
         &model_id,
         reasoning_effort,
         extra_headers,
-        if conversation_id.is_empty() {
+        if server_conversation_token.is_empty() {
             None
         } else {
-            Some(conversation_id.as_str())
+            Some(server_conversation_token.as_str())
         },
     );
     let client = build_client(api_type, &base_url, api_key);
@@ -3446,7 +3456,7 @@ pub async fn generate_byop_output(
             r#type: Some(api::response_event::Type::Init(
                 api::response_event::StreamInit {
                     request_id: request_id.clone(),
-                    conversation_id,
+                    conversation_id: server_conversation_token,
                     run_id: String::new(),
                 },
             )),
@@ -4493,6 +4503,8 @@ pub(crate) async fn generate_title_via_byop(
         model_id: tg.model_id.clone(),
         api_type: tg.api_type,
         reasoning_effort: tg.reasoning_effort,
+        extra_headers: tg.extra_headers.clone(),
+        conversation_id: tg.conversation_id,
     };
     let system = include_str!("prompts/tasks/title_system.md");
     let user_prompt = format!(
@@ -6087,6 +6099,37 @@ mod cache_boundary_stability_tests {
                 "{api:?} 不应下发 cache_control"
             );
         }
+    }
+
+    /// `{conversationId}` 解析后的值必须原样进入 `ChatOptions`。
+    #[test]
+    fn resolved_conversation_header_reaches_chat_options() {
+        use crate::settings::ReasoningEffortSetting as R;
+        let conversation_id =
+            AIConversationId::try_from("0b0a0c1e-1111-4222-8333-444455556666".to_owned())
+                .expect("valid uuid");
+        let headers = super::super::header_vars::resolve_headers(
+            &[(
+                "x-session-id".to_owned(),
+                "conv-{conversationId}".to_owned(),
+            )],
+            &HeaderVars::default().with_conversation_id(Some(conversation_id)),
+        );
+        let opts = build_chat_options(
+            AgentProviderApiType::OpenAi,
+            "https://api.openai.com/v1/",
+            "gpt-5-mini",
+            R::Auto,
+            headers,
+            None,
+        );
+        let value = opts
+            .extra_headers
+            .expect("resolved headers applied")
+            .iter()
+            .find(|(name, _)| name.as_str() == "x-session-id")
+            .map(|(_, value)| value.clone());
+        assert_eq!(value, Some(format!("conv-{conversation_id}")));
     }
 }
 

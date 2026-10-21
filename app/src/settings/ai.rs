@@ -1407,6 +1407,10 @@ pub struct AgentProvider {
     /// 附加 HTTP 请求头,发给上游 provider 时逐条 merge 进请求。
     /// 用于需要额外路由头的 gateway(如 Portkey 的 `x-portkey-provider`)。
     /// `api_key` 仍走 `Authorization: Bearer` 标准路径。
+    ///
+    /// 值支持占位符 `{conversationId}`(区分大小写,仅替换 header 值,名称不替换):
+    /// 发送时替换为当前 Agent 会话的本地 ID,同一会话跨轮次、跨重启保持不变。
+    /// 没有会话的请求会整条跳过该 header(不发空值);无法识别的 `{...}` 原样保留。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_headers: Vec<(String, String)>,
 }

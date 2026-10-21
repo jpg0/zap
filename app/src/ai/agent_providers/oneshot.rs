@@ -21,6 +21,7 @@ use genai::chat::{ChatMessage, ChatOptions, ChatRequest, ChatStreamEvent};
 use warpui::{AppContext, EntityId, SingletonEntity as _};
 
 use super::chat_stream;
+use crate::ai::agent::conversation::AIConversationId;
 use crate::ai::llms::LLMPreferences;
 use crate::settings::{AgentProviderApiType, ReasoningEffortSetting};
 
@@ -32,6 +33,8 @@ pub struct OneshotConfig {
     pub model_id: String,
     pub api_type: AgentProviderApiType,
     pub reasoning_effort: ReasoningEffortSetting,
+    pub extra_headers: Vec<(String, String)>,
+    pub conversation_id: Option<AIConversationId>,
 }
 
 /// One-shot 调用的可选参数。
@@ -174,6 +177,8 @@ pub fn resolve_active_ai_oneshot(
         model_id,
         api_type: provider.api_type,
         reasoning_effort,
+        extra_headers: provider.extra_headers,
+        conversation_id: None,
     })
 }
 
@@ -197,5 +202,8 @@ pub fn resolve_next_command_oneshot(
         model_id,
         api_type: provider.api_type,
         reasoning_effort,
+        extra_headers: provider.extra_headers,
+        conversation_id: None,
     })
 }
+
